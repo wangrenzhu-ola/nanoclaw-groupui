@@ -355,7 +355,7 @@ async function startMessageLoop(): Promise<void> {
       // Dynamically load groups in case they were added via WebUI
       registeredGroups = getAllRegisteredGroups();
       const jids = Object.keys(registeredGroups);
-      
+
       const { messages, newTimestamp } = getNewMessages(
         jids,
         lastTimestamp,
