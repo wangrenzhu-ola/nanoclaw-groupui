@@ -115,20 +115,24 @@ export function cleanupOrphans(): void {
     // Our container name is nanoclaw-groupui-core-1. It starts with nanoclaw-.
     // We must filter out self.
     const selfId = os.hostname(); // Container hostname is usually short ID
-    
+
     // Actually, let's just log and skip killing for now to avoid self-destruct if that's the issue
     // Or filter strictly for 'nanoclaw-agent-' if that's what we spawn?
     // In container-runner.ts we spawn 'nanoclaw-agent-{uuid}'.
     // So we should filter name=nanoclaw-agent-
-    
+
     // Let's modify the filter to be safer.
     // Or just try-catch the kill.
-    
+
     for (const name of orphans) {
-        // Skip if it looks like our service components
-        if (name.includes('nanoclaw-groupui-core') || name.includes('nanoclaw-groupui-webui') || name.includes('nanoclaw-groupui-nginx')) {
-            continue;
-        }
+      // Skip if it looks like our service components
+      if (
+        name.includes('nanoclaw-groupui-core') ||
+        name.includes('nanoclaw-groupui-webui') ||
+        name.includes('nanoclaw-groupui-nginx')
+      ) {
+        continue;
+      }
       try {
         execSync(stopContainer(name), { stdio: 'ignore' });
       } catch {

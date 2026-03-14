@@ -43,9 +43,9 @@ class CliChannel implements Channel {
       new Date().toISOString(),
       'CLI Chat',
       'cli',
-      false
+      false,
     );
-    
+
     console.log('CLI Channel connected. Type messages to chat.');
     this.rl.prompt();
   }

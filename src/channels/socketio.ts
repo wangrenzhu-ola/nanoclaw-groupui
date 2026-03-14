@@ -1,5 +1,10 @@
 import { io, Socket } from 'socket.io-client';
-import { Channel, OnInboundMessage, OnChatMetadata, NewMessage } from '../types.js';
+import {
+  Channel,
+  OnInboundMessage,
+  OnChatMetadata,
+  NewMessage,
+} from '../types.js';
 import { logger } from '../logger.js';
 
 export interface SocketIOChannelConfig {
@@ -37,19 +42,21 @@ export class SocketIOChannel implements Channel {
     this.socket.on('client:message', (data: any) => {
       // Data from WebUI: { chat_jid, content, sender, timestamp? }
       logger.debug({ data }, 'Received socket message');
-      
+
       // Note: WebUI (server.ts) already saves message to DB.
       // We listen here mainly to update metadata or trigger immediate processing if needed.
       // But Core polls DB, so we don't need to store it again to avoid duplicates.
       // However, we might want to ensure metadata is fresh.
-      
+
       const msg: NewMessage = {
         id: data.id || Date.now().toString(),
         chat_jid: data.chat_jid,
         sender: data.sender || 'User',
         sender_name: data.sender || 'User',
         content: data.content,
-        timestamp: data.timestamp ? new Date(data.timestamp).toISOString() : new Date().toISOString(),
+        timestamp: data.timestamp
+          ? new Date(data.timestamp).toISOString()
+          : new Date().toISOString(),
         is_from_me: false, // Inbound from user
       };
 
@@ -58,9 +65,15 @@ export class SocketIOChannel implements Channel {
       // If we call it, we duplicate.
       // So we comment this out for now, relying on DB polling.
       // this.onMessage(msg.chat_jid, msg);
-      
+
       // Update metadata (assume it exists if message received)
-      this.onChatMetadata(msg.chat_jid, msg.timestamp, msg.chat_jid.split('@')[0], 'socketio', true);
+      this.onChatMetadata(
+        msg.chat_jid,
+        msg.timestamp,
+        msg.chat_jid.split('@')[0],
+        'socketio',
+        true,
+      );
     });
 
     this.socket.on('disconnect', () => {
@@ -73,11 +86,11 @@ export class SocketIOChannel implements Channel {
       logger.warn({ jid }, 'Cannot send message: Socket not connected');
       return;
     }
-    
+
     // Emit agent:response
     this.socket.emit('agent:response', {
-        jid,
-        content: text
+      jid,
+      content: text,
     });
   }
 
@@ -100,18 +113,16 @@ export class SocketIOChannel implements Channel {
   async setTyping(jid: string, isTyping: boolean): Promise<void> {
     if (!this.socket?.connected) return;
     if (isTyping) {
-        this.socket.emit('agent:typing', { chat_jid: jid });
+      this.socket.emit('agent:typing', { chat_jid: jid });
     }
   }
 }
 
-export function createSocketIOChannel(
-  config: { 
-    onMessage: OnInboundMessage; 
-    onChatMetadata: OnChatMetadata;
-    registeredGroups: () => any 
-  }
-): Channel | null {
+export function createSocketIOChannel(config: {
+  onMessage: OnInboundMessage;
+  onChatMetadata: OnChatMetadata;
+  registeredGroups: () => any;
+}): Channel | null {
   // Check if WebUI URL is configured, or default to localhost:3000
   const url = process.env.WEBUI_URL || 'http://localhost:3000';
   return new SocketIOChannel({

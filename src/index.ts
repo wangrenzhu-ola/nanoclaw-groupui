@@ -593,7 +593,9 @@ const isDirectRun =
   new URL(import.meta.url).pathname ===
     new URL(`file://${process.argv[1]}`).pathname;
 
-console.log(`Checking run mode: argv[1]=${process.argv[1]}, meta.url=${import.meta.url}, isDirectRun=${isDirectRun}`);
+console.log(
+  `Checking run mode: argv[1]=${process.argv[1]}, meta.url=${import.meta.url}, isDirectRun=${isDirectRun}`,
+);
 
 if (isDirectRun) {
   main().catch((err) => {
@@ -601,5 +603,5 @@ if (isDirectRun) {
     process.exit(1);
   });
 } else {
-    console.log('Not direct run, skipping main()');
+  console.log('Not direct run, skipping main()');
 }
