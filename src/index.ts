@@ -352,7 +352,10 @@ async function startMessageLoop(): Promise<void> {
 
   while (true) {
     try {
+      // Dynamically load groups in case they were added via WebUI
+      registeredGroups = getAllRegisteredGroups();
       const jids = Object.keys(registeredGroups);
+      
       const { messages, newTimestamp } = getNewMessages(
         jids,
         lastTimestamp,
@@ -378,7 +381,15 @@ async function startMessageLoop(): Promise<void> {
         }
 
         for (const [chatJid, groupMessages] of messagesByGroup) {
-          const group = registeredGroups[chatJid];
+          let group = registeredGroups[chatJid];
+          if (!group) {
+            // Check DB in case it was created via UI since startup
+            const dbGroup = getRegisteredGroup(chatJid);
+            if (dbGroup) {
+              registerGroup(chatJid, dbGroup);
+              group = dbGroup;
+            }
+          }
           if (!group) continue;
 
           const channel = findChannel(channels, chatJid);

@@ -450,10 +450,12 @@ NanoClaw uses a hierarchical memory system based on CLAUDE.md files.
 - Groups are registered in SQLite (via the main channel or IPC `register_group` command).
 - Each group gets a dedicated folder under `groups/`.
 - Groups can have additional directories mounted via `containerConfig`.
-- **WebUI UX - Agents & Contacts**: 
-  - The WebUI presents a "Contacts / Agents" list representing available bots (e.g., the configured `ASSISTANT_NAME`).
-  - Users create a Channel first, then "Add/Invite" an Agent to the channel.
-  - The `@mention` feature in the chat console dynamically reads the channel's member list. If a channel is empty, no agents can be mentioned.
+- **WebUI UX - Slack-like Interaction**: 
+  - **Sidebar**: Displays "Channels" (chat groups) and "Agents" (direct contacts, e.g., default `ASSISTANT_NAME`).
+  - **Channel View**: Clicking a channel opens the chat console.
+  - **Channel Details**: The "View Details" button in a channel shows *channel-specific* information (e.g., Folder path, Sandbox container config, Scheduled Tasks for the channel).
+  - **Agent Management**: Users can "Add Agent" to a channel. Only added agents can be `@mentioned`.
+  - **Agent Details**: Clicking an Agent (from the sidebar or within a channel's member list) shows *agent-specific* settings (e.g., Memory/CLAUDE.md, Sender Allowlist security).
 
 ### Main Channel Privileges
 - Only the "main" group (self-chat) can write to global memory

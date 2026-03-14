@@ -6,7 +6,7 @@
 
 ### Requirement: 实时聊天交互 (Real-time Chat Interaction)
 
-系统 MUST 提供用户与 Agent 之间的实时聊天能力，支持文本消息的发送与流式响应渲染。
+系统 MUST 提供用户与 Agent 之间的实时聊天能力，支持文本消息的发送与流式响应渲染，并具备输入状态提示。
 
 #### Scenario: 实时聊天交互
 
@@ -16,28 +16,81 @@ Then 消息应通过 Socket.io 发送到 NanoClaw 后端
 And 后端响应应实时流式传输回 UI
 And 响应中的 Markdown 内容应被正确渲染
 
+#### Scenario: LLM 输入态提示
+
+Given 用户已发送消息，等待 LLM 回复
+When LLM 正在处理或生成内容但尚未返回文本时
+Then 聊天界面底部应显示“Agent正在输入...”的提示
+And 当收到流式回复内容或回复结束时，提示应自动消失
+
 ### Requirement: 群聊管理 (Group Chat Management)
 
-系统 MUST 允许用户创建和管理包含多个 Agent 的群组聊天，支持成员的增删。
+系统 MUST 允许用户创建、删除和管理包含多个 Agent 的群组聊天（频道），支持成员的增删。
 
-#### Scenario: 群聊管理
+#### Scenario: 群聊创建与自动跳转
 
-Given 用户在聊天控制台
-When 他们点击“创建群组”
-Then 应弹出模态框以输入群组名称并选择 Agent
-And 确认后，应创建一个新的群组频道
-And 用户应能够向该群组发送消息
+Given 用户在聊天控制台点击“创建群组”
+When 输入有效名称并确认创建
+Then 系统应在后台创建群组数据
+And 页面应自动无缝跳转至新创建的群组聊天页
+And 不应出现 404 或页面加载错误
+
+#### Scenario: 群聊删除
+
+Given 用户是群组管理员或创建者
+When 在频道详情页点击“删除频道”并确认二次弹窗
+Then 该频道应从侧边栏移除
+And 相关的聊天记录和任务数据应被清理或归档
+And 页面应跳转至默认页或“所有频道”页
 
 ### Requirement: @提及与全员广播（@mention & @everyone Broadcast）
 
-系统 MUST 支持在群聊中 @提及特定 Agent 以及使用 @everyone 进行全员广播。
+系统 MUST 支持在群聊中 @提及特定 Agent。**特别约束：当频道内无 Agent 成员时，禁止触发 @提及功能。**
 
 #### Scenario: @单个Agent定向触发
 
-Given 用户在群聊会话中
-When 他们输入`@`并选择指定Agent发送消息
+Given 用户在群聊会话中且群内**至少有一名 Agent 成员**
+When 他们输入`@`
+Then 应弹出当前频道内的 Agent 成员列表供选择
+When 选择指定Agent发送消息
 Then 被@的Agent应被定向触发响应
-And 消息中应高亮显示被@的Agent名称
+
+#### Scenario: 空频道禁止 @提及
+
+Given 用户在一个**没有任何 Agent 成员**的频道中
+When 他们输入`@`
+Then **系统不应弹出任何提及列表**
+And 无法选中或触发任何 Agent
+And 界面应（可选）提示“请先邀请 Agent 加入频道”
+
+### Requirement: 频道成员管理 (Channel Member Management)
+
+系统 MUST 在频道详情页提供成员列表，并支持对 Agent 成员的邀请和移除，交互对标 Slack。
+
+#### Scenario: 查看频道成员列表
+
+Given 用户在频道详情页
+When 点击“成员 (Members)”标签或模块
+Then 应列出当前频道内的所有 Agent 成员
+And 每个成员应显示头像、名称及在线状态
+
+#### Scenario: 邀请 Agent 加入频道
+
+Given 用户在频道详情页或聊天页
+When 点击“添加成员”或“邀请 Agent”
+Then 应弹出全局可用 Agent 列表
+When 选择 Agent 并确认
+Then 该 Agent 应加入频道成员列表
+And 聊天区域应显示“xxx 已加入频道”的系统消息
+And 此时该 Agent 可被 @提及
+
+#### Scenario: 移除频道成员
+
+Given 用户在频道详情页的成员列表中
+When 对某个 Agent 点击“移除”并确认
+Then 该 Agent 应从成员列表中消失
+And 该 Agent 不再响应频道的 @everyone 消息
+And 该 Agent 不再出现在 @提及列表中
 
 #### Scenario: @everyone全员广播
 
@@ -45,6 +98,32 @@ Given 用户在群聊会话中
 When 他们输入包含`@everyone`的消息并发送
 Then 群内所有Agent都应被触发响应
 And 消息中应高亮显示`@everyone`标识
+
+### Requirement: Slack 风格交互界面 (Slack-like Interaction UI)
+
+系统 MUST 提供类似于 Slack 的频道与成员分离的交互界面，明确区分“频道配置”与“Agent 详情”。
+
+#### Scenario: 频道详情查看
+
+Given 用户在频道聊天界面
+When 他们点击“查看详情”
+Then 应展示频道的配置信息（如名称、文件夹路径、沙箱配置、频道定时任务）
+And 不应展示 Agent 的记忆或全局安全设置
+
+#### Scenario: Agent 详情查看
+
+Given 用户在侧边栏或频道成员列表中
+When 他们点击 Agent 头像
+Then 应进入 Agent 全局详情页
+And 应展示 Agent 的全局记忆（Global CLAUDE.md）和安全白名单
+And 支持编辑保存
+
+#### Scenario: 邀请 Agent 入群
+
+Given 用户在一个未关联 Agent 的频道中
+When 他们点击“添加 Agent”或“邀请成员”
+Then Agent 应被加入该频道
+And 用户可在该频道中使用 `@` 提及该 Agent
 
 ### Requirement: 图片上传 (Image Upload)
 

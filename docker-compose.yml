@@ -13,6 +13,7 @@ services:
       context: ./webui
     environment:
       - DATABASE_URL=file:/app/groups/messages.db
+      - RUNTIME_DB_URL=file:/app/groups/messages.db
       - GROUPS_PATH=/app/groups
       - AUTH_SECRET=supersecret
       - ADMIN_PASSWORD=admin
@@ -29,6 +30,7 @@ services:
     # command: ["node", "dist/index.js"] # Removed override to use Dockerfile CMD
     environment:
       - GROUPS_PATH=/app/groups
+      - STORE_DIR=/app/groups
       - LOG_LEVEL=debug
       - CREDENTIAL_PROXY_PORT=3002
       - WEBUI_URL=http://webui:3000
