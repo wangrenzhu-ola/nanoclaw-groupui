@@ -238,6 +238,11 @@ function buildContainerArgs(
     args.push('-e', 'CLAUDE_CODE_OAUTH_TOKEN=placeholder');
   }
 
+  // Pass MODEL_NAME to container so SDK can use it
+  if (process.env.MODEL_NAME) {
+    args.push('-e', `MODEL_NAME=${process.env.MODEL_NAME}`);
+  }
+
   // Runtime-specific args for host gateway resolution
   args.push(...hostGatewayArgs());
 

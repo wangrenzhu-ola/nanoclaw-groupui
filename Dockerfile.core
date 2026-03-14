@@ -1,0 +1,18 @@
+FROM node:20-alpine
+
+# Install Docker client for DinD and build tools for native modules (better-sqlite3)
+RUN apk add --no-cache docker-cli python3 make g++
+
+WORKDIR /app
+
+COPY package*.json ./
+RUN npm ci
+
+COPY entrypoint.sh .
+RUN chmod +x entrypoint.sh
+
+COPY . .
+
+RUN npm run build
+
+CMD ["/bin/sh", "./entrypoint.sh"]

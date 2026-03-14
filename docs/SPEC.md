@@ -445,11 +445,21 @@ NanoClaw uses a hierarchical memory system based on CLAUDE.md files.
    - When user says "remember this globally" (main channel only), agent writes to `../CLAUDE.md`
    - Agent can create files like `notes.md`, `research.md` in the group folder
 
-3. **Main Channel Privileges**
-   - Only the "main" group (self-chat) can write to global memory
-   - Main can manage registered groups and schedule tasks for any group
-   - Main can configure additional directory mounts for any group
-   - All groups have Bash access (safe because it runs inside container)
+### Group Management
+- New groups are added explicitly via the main channel or WebUI.
+- Groups are registered in SQLite (via the main channel or IPC `register_group` command).
+- Each group gets a dedicated folder under `groups/`.
+- Groups can have additional directories mounted via `containerConfig`.
+- **WebUI UX - Agents & Contacts**: 
+  - The WebUI presents a "Contacts / Agents" list representing available bots (e.g., the configured `ASSISTANT_NAME`).
+  - Users create a Channel first, then "Add/Invite" an Agent to the channel.
+  - The `@mention` feature in the chat console dynamically reads the channel's member list. If a channel is empty, no agents can be mentioned.
+
+### Main Channel Privileges
+- Only the "main" group (self-chat) can write to global memory
+- Main can manage registered groups and schedule tasks for any group
+- Main can configure additional directory mounts for any group
+- All groups have Bash access (safe because it runs inside container)
 
 ---
 

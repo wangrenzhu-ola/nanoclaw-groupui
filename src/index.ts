@@ -466,10 +466,13 @@ function ensureContainerSystemRunning(): void {
 }
 
 async function main(): Promise<void> {
-  ensureContainerSystemRunning();
+  console.log('Main started');
+  // ensureContainerSystemRunning();
+  console.log('Container system running (skipped)');
   initDatabase();
   logger.info('Database initialized');
   loadState();
+  console.log('State loaded');
 
   // Start credential proxy (containers route API calls through this)
   const proxyServer = await startCredentialProxy(
@@ -590,9 +593,13 @@ const isDirectRun =
   new URL(import.meta.url).pathname ===
     new URL(`file://${process.argv[1]}`).pathname;
 
+console.log(`Checking run mode: argv[1]=${process.argv[1]}, meta.url=${import.meta.url}, isDirectRun=${isDirectRun}`);
+
 if (isDirectRun) {
   main().catch((err) => {
     logger.error({ err }, 'Failed to start NanoClaw');
     process.exit(1);
   });
+} else {
+    console.log('Not direct run, skipping main()');
 }

@@ -65,8 +65,9 @@ export function stopContainer(name: string): string {
 /** Ensure the container runtime is running, starting it if needed. */
 export function ensureContainerRuntimeRunning(): void {
   try {
-    execSync(`${CONTAINER_RUNTIME_BIN} info`, {
-      stdio: 'pipe',
+    // Just check version first, it's faster
+    execSync(`${CONTAINER_RUNTIME_BIN} version`, {
+      stdio: 'ignore', // Ignore output, just check exit code
       timeout: 10000,
     });
     logger.debug('Container runtime already running');
@@ -103,14 +104,33 @@ export function ensureContainerRuntimeRunning(): void {
 /** Kill orphaned NanoClaw containers from previous runs. */
 export function cleanupOrphans(): void {
   try {
+    // Only check running containers to avoid listing stopped ones
     const output = execSync(
       `${CONTAINER_RUNTIME_BIN} ps --filter name=nanoclaw- --format '{{.Names}}'`,
-      { stdio: ['pipe', 'pipe', 'pipe'], encoding: 'utf-8' },
+      { stdio: ['pipe', 'pipe', 'pipe'], encoding: 'utf-8', timeout: 5000 },
     );
     const orphans = output.trim().split('\n').filter(Boolean);
+    // Don't kill self! But name filtering should avoid it as we are nanoclaw-groupui-core
+    // But orphan filter catches 'nanoclaw-agent-xxx' or similar.
+    // Our container name is nanoclaw-groupui-core-1. It starts with nanoclaw-.
+    // We must filter out self.
+    const selfId = os.hostname(); // Container hostname is usually short ID
+    
+    // Actually, let's just log and skip killing for now to avoid self-destruct if that's the issue
+    // Or filter strictly for 'nanoclaw-agent-' if that's what we spawn?
+    // In container-runner.ts we spawn 'nanoclaw-agent-{uuid}'.
+    // So we should filter name=nanoclaw-agent-
+    
+    // Let's modify the filter to be safer.
+    // Or just try-catch the kill.
+    
     for (const name of orphans) {
+        // Skip if it looks like our service components
+        if (name.includes('nanoclaw-groupui-core') || name.includes('nanoclaw-groupui-webui') || name.includes('nanoclaw-groupui-nginx')) {
+            continue;
+        }
       try {
-        execSync(stopContainer(name), { stdio: 'pipe' });
+        execSync(stopContainer(name), { stdio: 'ignore' });
       } catch {
         /* already stopped */
       }
