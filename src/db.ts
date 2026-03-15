@@ -32,6 +32,10 @@ function createSchema(database: Database.Database): void {
       timestamp TEXT,
       is_from_me INTEGER,
       is_bot_message INTEGER DEFAULT 0,
+      edited INTEGER DEFAULT 0,
+      edited_at TEXT,
+      recalled INTEGER DEFAULT 0,
+      recalled_at TEXT,
       PRIMARY KEY (id, chat_jid),
       FOREIGN KEY (chat_jid) REFERENCES chats(jid)
     );
@@ -73,6 +77,36 @@ function createSchema(database: Database.Database): void {
       group_folder TEXT PRIMARY KEY,
       session_id TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS unread_state (
+      chat_jid TEXT NOT NULL,
+      actor TEXT NOT NULL,
+      last_read_timestamp TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (chat_jid, actor)
+    );
+    CREATE TABLE IF NOT EXISTS presence_state (
+      actor TEXT PRIMARY KEY,
+      online INTEGER NOT NULL DEFAULT 0,
+      status TEXT NOT NULL DEFAULT 'offline',
+      updated_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS notification_user_settings (
+      actor TEXT PRIMARY KEY,
+      global_level TEXT NOT NULL DEFAULT 'all',
+      dnd_enabled INTEGER NOT NULL DEFAULT 0,
+      dnd_start TEXT,
+      dnd_end TEXT,
+      keywords TEXT NOT NULL DEFAULT '[]',
+      updated_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS notification_chat_settings (
+      actor TEXT NOT NULL,
+      chat_jid TEXT NOT NULL,
+      muted INTEGER NOT NULL DEFAULT 0,
+      allow_mentions INTEGER NOT NULL DEFAULT 1,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (actor, chat_jid)
+    );
     CREATE TABLE IF NOT EXISTS registered_groups (
       jid TEXT PRIMARY KEY,
       name TEXT NOT NULL,
@@ -102,6 +136,30 @@ function createSchema(database: Database.Database): void {
     database
       .prepare(`UPDATE messages SET is_bot_message = 1 WHERE content LIKE ?`)
       .run(`${ASSISTANT_NAME}:%`);
+  } catch {
+    /* column already exists */
+  }
+
+  try {
+    database.exec(`ALTER TABLE messages ADD COLUMN edited INTEGER DEFAULT 0`);
+  } catch {
+    /* column already exists */
+  }
+
+  try {
+    database.exec(`ALTER TABLE messages ADD COLUMN edited_at TEXT`);
+  } catch {
+    /* column already exists */
+  }
+
+  try {
+    database.exec(`ALTER TABLE messages ADD COLUMN recalled INTEGER DEFAULT 0`);
+  } catch {
+    /* column already exists */
+  }
+
+  try {
+    database.exec(`ALTER TABLE messages ADD COLUMN recalled_at TEXT`);
   } catch {
     /* column already exists */
   }
@@ -262,7 +320,7 @@ export function setLastGroupSync(): void {
  */
 export function storeMessage(msg: NewMessage): void {
   db.prepare(
-    `INSERT OR REPLACE INTO messages (id, chat_jid, sender, sender_name, content, timestamp, is_from_me, is_bot_message) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT OR REPLACE INTO messages (id, chat_jid, sender, sender_name, content, timestamp, is_from_me, is_bot_message, edited, edited_at, recalled, recalled_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     msg.id,
     msg.chat_jid,
@@ -272,6 +330,10 @@ export function storeMessage(msg: NewMessage): void {
     msg.timestamp,
     msg.is_from_me ? 1 : 0,
     msg.is_bot_message ? 1 : 0,
+    0,
+    null,
+    0,
+    null,
   );
 }
 
@@ -287,9 +349,13 @@ export function storeMessageDirect(msg: {
   timestamp: string;
   is_from_me: boolean;
   is_bot_message?: boolean;
+  edited?: boolean;
+  edited_at?: string | null;
+  recalled?: boolean;
+  recalled_at?: string | null;
 }): void {
   db.prepare(
-    `INSERT OR REPLACE INTO messages (id, chat_jid, sender, sender_name, content, timestamp, is_from_me, is_bot_message) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT OR REPLACE INTO messages (id, chat_jid, sender, sender_name, content, timestamp, is_from_me, is_bot_message, edited, edited_at, recalled, recalled_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     msg.id,
     msg.chat_jid,
@@ -299,7 +365,75 @@ export function storeMessageDirect(msg: {
     msg.timestamp,
     msg.is_from_me ? 1 : 0,
     msg.is_bot_message ? 1 : 0,
+    msg.edited ? 1 : 0,
+    msg.edited_at ?? null,
+    msg.recalled ? 1 : 0,
+    msg.recalled_at ?? null,
   );
+}
+
+export interface StoredMessageRecord {
+  id: string;
+  chat_jid: string;
+  sender: string;
+  sender_name: string;
+  content: string;
+  timestamp: string;
+  is_from_me: number;
+  edited: number;
+  edited_at: string | null;
+  recalled: number;
+  recalled_at: string | null;
+}
+
+export function getMessageById(
+  chatJid: string,
+  messageId: string,
+): StoredMessageRecord | undefined {
+  return db
+    .prepare(
+      `
+      SELECT id, chat_jid, sender, sender_name, content, timestamp, is_from_me, edited, edited_at, recalled, recalled_at
+      FROM messages
+      WHERE chat_jid = ? AND id = ?
+    `,
+    )
+    .get(chatJid, messageId) as StoredMessageRecord | undefined;
+}
+
+export function editMessage(
+  chatJid: string,
+  messageId: string,
+  content: string,
+  editedAt: string,
+): boolean {
+  const result = db
+    .prepare(
+      `
+      UPDATE messages
+      SET content = ?, edited = 1, edited_at = ?
+      WHERE chat_jid = ? AND id = ? AND recalled = 0
+    `,
+    )
+    .run(content, editedAt, chatJid, messageId);
+  return result.changes > 0;
+}
+
+export function recallMessage(
+  chatJid: string,
+  messageId: string,
+  recalledAt: string,
+): boolean {
+  const result = db
+    .prepare(
+      `
+      UPDATE messages
+      SET recalled = 1, recalled_at = ?, content = ''
+      WHERE chat_jid = ? AND id = ? AND recalled = 0
+    `,
+    )
+    .run(recalledAt, chatJid, messageId);
+  return result.changes > 0;
 }
 
 export function getNewMessages(
@@ -316,7 +450,7 @@ export function getNewMessages(
   // Subquery takes the N most recent, outer query re-sorts chronologically.
   const sql = `
     SELECT * FROM (
-      SELECT id, chat_jid, sender, sender_name, content, timestamp, is_from_me
+      SELECT id, chat_jid, sender, sender_name, content, timestamp, is_from_me, edited, edited_at, recalled, recalled_at
       FROM messages
       WHERE timestamp > ? AND chat_jid IN (${placeholders})
         AND is_bot_message = 0 AND content NOT LIKE ?
@@ -349,7 +483,7 @@ export function getMessagesSince(
   // Subquery takes the N most recent, outer query re-sorts chronologically.
   const sql = `
     SELECT * FROM (
-      SELECT id, chat_jid, sender, sender_name, content, timestamp, is_from_me
+      SELECT id, chat_jid, sender, sender_name, content, timestamp, is_from_me, edited, edited_at, recalled, recalled_at
       FROM messages
       WHERE chat_jid = ? AND timestamp > ?
         AND is_bot_message = 0 AND content NOT LIKE ?
@@ -361,6 +495,359 @@ export function getMessagesSince(
   return db
     .prepare(sql)
     .all(chatJid, sinceTimestamp, `${botPrefix}:%`, limit) as NewMessage[];
+}
+
+export interface ChatUnreadState {
+  chatJid: string;
+  actor: string;
+  unreadCount: number;
+  lastReadTimestamp: string | null;
+  latestMessageTimestamp: string | null;
+}
+
+export function getChatUnreadState(
+  chatJid: string,
+  actor: string,
+  botPrefix: string,
+): ChatUnreadState {
+  const state = db
+    .prepare(
+      `
+      SELECT last_read_timestamp
+      FROM unread_state
+      WHERE chat_jid = ? AND actor = ?
+    `,
+    )
+    .get(chatJid, actor) as { last_read_timestamp: string } | undefined;
+
+  const lastReadTimestamp = state?.last_read_timestamp || null;
+  const latestRow = db
+    .prepare(
+      `
+      SELECT MAX(timestamp) AS latest
+      FROM messages
+      WHERE chat_jid = ?
+        AND is_bot_message = 0 AND content NOT LIKE ?
+        AND content != '' AND content IS NOT NULL
+    `,
+    )
+    .get(chatJid, `${botPrefix}:%`) as { latest: string | null };
+
+  const unreadRow = db
+    .prepare(
+      `
+      SELECT COUNT(*) AS total
+      FROM messages
+      WHERE chat_jid = ?
+        AND (? IS NULL OR timestamp > ?)
+        AND is_bot_message = 0 AND content NOT LIKE ?
+        AND content != '' AND content IS NOT NULL
+    `,
+    )
+    .get(
+      chatJid,
+      lastReadTimestamp,
+      lastReadTimestamp,
+      `${botPrefix}:%`,
+    ) as { total: number };
+
+  return {
+    chatJid,
+    actor,
+    unreadCount: Number(unreadRow.total || 0),
+    lastReadTimestamp,
+    latestMessageTimestamp: latestRow.latest || null,
+  };
+}
+
+export function markChatAsRead(
+  chatJid: string,
+  actor: string,
+  botPrefix: string,
+  explicitLastReadTimestamp?: string,
+): ChatUnreadState {
+  let targetTimestamp = explicitLastReadTimestamp || '';
+  if (!targetTimestamp) {
+    const latestRow = db
+      .prepare(
+        `
+        SELECT MAX(timestamp) AS latest
+        FROM messages
+        WHERE chat_jid = ?
+          AND is_bot_message = 0 AND content NOT LIKE ?
+          AND content != '' AND content IS NOT NULL
+      `,
+      )
+      .get(chatJid, `${botPrefix}:%`) as { latest: string | null };
+    targetTimestamp = latestRow.latest || '';
+  }
+  const nowIso = new Date().toISOString();
+  db.prepare(
+    `
+    INSERT INTO unread_state (chat_jid, actor, last_read_timestamp, updated_at)
+    VALUES (?, ?, ?, ?)
+    ON CONFLICT(chat_jid, actor) DO UPDATE SET
+      last_read_timestamp = excluded.last_read_timestamp,
+      updated_at = excluded.updated_at
+  `,
+  ).run(chatJid, actor, targetTimestamp, nowIso);
+  return getChatUnreadState(chatJid, actor, botPrefix);
+}
+
+export function getUnreadAggregate(
+  actor: string,
+  botPrefix: string,
+): {
+  actor: string;
+  totalUnread: number;
+  chats: ChatUnreadState[];
+} {
+  const chats = db
+    .prepare(
+      `
+      SELECT jid FROM chats
+      WHERE jid != '__group_sync__'
+      ORDER BY last_message_time DESC
+    `,
+    )
+    .all() as Array<{ jid: string }>;
+
+  const items = chats.map((chat) => getChatUnreadState(chat.jid, actor, botPrefix));
+  const totalUnread = items.reduce((acc, item) => acc + item.unreadCount, 0);
+  return { actor, totalUnread, chats: items };
+}
+
+export interface PresenceState {
+  actor: string;
+  online: boolean;
+  status: 'online' | 'away' | 'offline';
+  updatedAt: string;
+}
+
+export function setPresenceState(
+  actor: string,
+  online: boolean,
+  status: 'online' | 'away' | 'offline',
+): PresenceState {
+  const nowIso = new Date().toISOString();
+  db.prepare(
+    `
+    INSERT INTO presence_state (actor, online, status, updated_at)
+    VALUES (?, ?, ?, ?)
+    ON CONFLICT(actor) DO UPDATE SET
+      online = excluded.online,
+      status = excluded.status,
+      updated_at = excluded.updated_at
+  `,
+  ).run(actor, online ? 1 : 0, status, nowIso);
+  return { actor, online, status, updatedAt: nowIso };
+}
+
+export function getPresenceStates(): PresenceState[] {
+  const rows = db
+    .prepare(
+      `
+      SELECT actor, online, status, updated_at
+      FROM presence_state
+      ORDER BY updated_at DESC
+    `,
+    )
+    .all() as Array<{
+    actor: string;
+    online: number;
+    status: 'online' | 'away' | 'offline';
+    updated_at: string;
+  }>;
+  return rows.map((row) => ({
+    actor: row.actor,
+    online: row.online === 1,
+    status: row.status,
+    updatedAt: row.updated_at,
+  }));
+}
+
+export type GlobalNotificationLevel = 'all' | 'mentions' | 'none';
+
+export interface UserNotificationSettings {
+  actor: string;
+  globalLevel: GlobalNotificationLevel;
+  dndEnabled: boolean;
+  dndStart: string | null;
+  dndEnd: string | null;
+  keywords: string[];
+  updatedAt: string;
+}
+
+export interface ChatNotificationSettings {
+  actor: string;
+  chatJid: string;
+  muted: boolean;
+  allowMentions: boolean;
+  updatedAt: string;
+}
+
+export function getUserNotificationSettings(actor: string): UserNotificationSettings {
+  const row = db
+    .prepare(
+      `
+      SELECT actor, global_level, dnd_enabled, dnd_start, dnd_end, keywords, updated_at
+      FROM notification_user_settings
+      WHERE actor = ?
+    `,
+    )
+    .get(actor) as
+    | {
+        actor: string;
+        global_level: GlobalNotificationLevel;
+        dnd_enabled: number;
+        dnd_start: string | null;
+        dnd_end: string | null;
+        keywords: string;
+        updated_at: string;
+      }
+    | undefined;
+
+  if (!row) {
+    return {
+      actor,
+      globalLevel: 'all',
+      dndEnabled: false,
+      dndStart: null,
+      dndEnd: null,
+      keywords: [],
+      updatedAt: '',
+    };
+  }
+  let keywords: string[] = [];
+  try {
+    const parsed = JSON.parse(row.keywords);
+    if (Array.isArray(parsed)) {
+      keywords = parsed
+        .map((value) => String(value).trim())
+        .filter((value) => value.length > 0);
+    }
+  } catch {
+    keywords = [];
+  }
+  return {
+    actor: row.actor,
+    globalLevel: row.global_level,
+    dndEnabled: row.dnd_enabled === 1,
+    dndStart: row.dnd_start,
+    dndEnd: row.dnd_end,
+    keywords,
+    updatedAt: row.updated_at,
+  };
+}
+
+export function setUserNotificationSettings(
+  actor: string,
+  input: {
+    globalLevel: GlobalNotificationLevel;
+    dndEnabled: boolean;
+    dndStart: string | null;
+    dndEnd: string | null;
+    keywords: string[];
+  },
+): UserNotificationSettings {
+  const nowIso = new Date().toISOString();
+  db.prepare(
+    `
+    INSERT INTO notification_user_settings (
+      actor, global_level, dnd_enabled, dnd_start, dnd_end, keywords, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(actor) DO UPDATE SET
+      global_level = excluded.global_level,
+      dnd_enabled = excluded.dnd_enabled,
+      dnd_start = excluded.dnd_start,
+      dnd_end = excluded.dnd_end,
+      keywords = excluded.keywords,
+      updated_at = excluded.updated_at
+  `,
+  ).run(
+    actor,
+    input.globalLevel,
+    input.dndEnabled ? 1 : 0,
+    input.dndStart,
+    input.dndEnd,
+    JSON.stringify(input.keywords),
+    nowIso,
+  );
+  return {
+    actor,
+    globalLevel: input.globalLevel,
+    dndEnabled: input.dndEnabled,
+    dndStart: input.dndStart,
+    dndEnd: input.dndEnd,
+    keywords: input.keywords,
+    updatedAt: nowIso,
+  };
+}
+
+export function getChatNotificationSettings(
+  actor: string,
+  chatJid: string,
+): ChatNotificationSettings {
+  const row = db
+    .prepare(
+      `
+      SELECT actor, chat_jid, muted, allow_mentions, updated_at
+      FROM notification_chat_settings
+      WHERE actor = ? AND chat_jid = ?
+    `,
+    )
+    .get(actor, chatJid) as
+    | {
+        actor: string;
+        chat_jid: string;
+        muted: number;
+        allow_mentions: number;
+        updated_at: string;
+      }
+    | undefined;
+  if (!row) {
+    return {
+      actor,
+      chatJid,
+      muted: false,
+      allowMentions: true,
+      updatedAt: '',
+    };
+  }
+  return {
+    actor: row.actor,
+    chatJid: row.chat_jid,
+    muted: row.muted === 1,
+    allowMentions: row.allow_mentions === 1,
+    updatedAt: row.updated_at,
+  };
+}
+
+export function setChatNotificationSettings(
+  actor: string,
+  chatJid: string,
+  muted: boolean,
+  allowMentions: boolean,
+): ChatNotificationSettings {
+  const nowIso = new Date().toISOString();
+  db.prepare(
+    `
+    INSERT INTO notification_chat_settings (
+      actor, chat_jid, muted, allow_mentions, updated_at
+    ) VALUES (?, ?, ?, ?, ?)
+    ON CONFLICT(actor, chat_jid) DO UPDATE SET
+      muted = excluded.muted,
+      allow_mentions = excluded.allow_mentions,
+      updated_at = excluded.updated_at
+  `,
+  ).run(actor, chatJid, muted ? 1 : 0, allowMentions ? 1 : 0, nowIso);
+  return {
+    actor,
+    chatJid,
+    muted,
+    allowMentions,
+    updatedAt: nowIso,
+  };
 }
 
 export function createTask(

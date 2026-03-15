@@ -55,6 +55,18 @@ describe('credential-proxy', () => {
 
     upstreamServer = http.createServer((req, res) => {
       lastUpstreamHeaders = { ...req.headers };
+      if (req.url === '/stream') {
+        res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' });
+        res.write('token-1\n');
+        res.write('token-2\n');
+        res.end('token-3\n');
+        return;
+      }
+      if (req.url === '/auth-fail') {
+        res.writeHead(401, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ code: 'AUTH_FAILED' }));
+        return;
+      }
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end(JSON.stringify({ ok: true }));
     });
@@ -188,5 +200,50 @@ describe('credential-proxy', () => {
 
     expect(res.statusCode).toBe(502);
     expect(res.body).toBe('Bad Gateway');
+  });
+
+  it('passes through 200 handshake response', async () => {
+    proxyPort = await startProxy({ ANTHROPIC_API_KEY: 'sk-ant-real-key' });
+    const res = await makeRequest(
+      proxyPort,
+      {
+        method: 'POST',
+        path: '/v1/messages',
+        headers: { 'content-type': 'application/json' },
+      },
+      '{}',
+    );
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toContain('"ok":true');
+  });
+
+  it('keeps streaming chunk order from upstream', async () => {
+    proxyPort = await startProxy({ ANTHROPIC_API_KEY: 'sk-ant-real-key' });
+    const res = await makeRequest(
+      proxyPort,
+      {
+        method: 'POST',
+        path: '/stream',
+        headers: { 'content-type': 'application/json' },
+      },
+      '{}',
+    );
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toBe('token-1\ntoken-2\ntoken-3\n');
+  });
+
+  it('passes through auth failure status and payload', async () => {
+    proxyPort = await startProxy({ ANTHROPIC_API_KEY: 'sk-ant-real-key' });
+    const res = await makeRequest(
+      proxyPort,
+      {
+        method: 'POST',
+        path: '/auth-fail',
+        headers: { 'content-type': 'application/json' },
+      },
+      '{}',
+    );
+    expect(res.statusCode).toBe(401);
+    expect(res.body).toContain('AUTH_FAILED');
   });
 });

@@ -1,311 +1,356 @@
-# NanoClaw WebUI 系统设计
+# NanoClaw WebUI 设计说明（design.md）
 
-## 1. 系统架构
+## 0. 文档元数据
 
-NanoClaw WebUI 采用现代化的解耦架构，专为私有化部署和实时交互设计。它与现有的 NanoClaw Core 无缝集成，同时提供丰富的用户界面。
+| 字段     | 内容                                 |
+| -------- | ------------------------------------ |
+| 文档 ID  | OSP-NCW-DESIGN-001                   |
+| 版本     | v2.0                                 |
+| 状态     | Draft-Ready for Review               |
+| 生效日期 | 2026-03-15                           |
+| 责任人   | 技术架构组 / 前端负责人 / 后端负责人 |
+| 关联规格 | `specs/nanoclaw-webui/spec.md`       |
 
-### 1.1 高层架构图
+## 1. 设计目标与边界
+
+1. 设计 MUST 对齐 Slack 交互范式，并保持 NanoClaw 私有化约束不变。
+2. 设计 MUST 明确频道配置与 Agent 全局详情的职责边界。
+3. 设计 MUST 提供可实现的信息架构、流程图、数据时序与权限矩阵。
+
+## 2. 信息架构
+
+### 2.1 页面分层图
 
 ```mermaid
 graph TD
-    User["用户 (浏览器)"] -->|"HTTP/HTTPS"| Nginx["Nginx 反向代理"]
-    Nginx -->|"Next.js App"| WebUI["WebUI 容器 (Next.js)"]
-    Nginx -->|"Socket.io"| SocketServer["Socket.io 服务"]
+  A[Workspace Shell] --> B[Sidebar]
+  A --> C[Main View]
+  A --> D[Right Drawer]
+  A --> E[Modal Layer]
 
-    subgraph "Docker Network: nanoclaw-net"
-        WebUI -->|"Prisma"| SQLite[("SQLite 数据库")]
-        WebUI -->|"文件系统"| GroupsVol["Groups 卷"]
-        WebUI -->|"API 代理"| NanoClaw["NanoClaw Core 容器"]
+  B --> B1[Channels]
+  B --> B2[Direct Messages]
+  B --> B3[Agents]
+  B --> B4[Unread Hub]
 
-        SocketServer -->|"事件"| WebUI
-        SocketServer -->|"事件"| NanoClaw
+  C --> C1[Channel Timeline]
+  C --> C2[DM Timeline]
+  C --> C3[Search Result]
+  C --> C4[File Browser]
 
-        NanoClaw -->|"读/写"| SQLite
-        NanoClaw -->|"读/写"| GroupsVol
-        NanoClaw -->|"LLM API"| MiniMax["MiniMax API"]
-    end
+  D --> D1[Thread Drawer]
+  D --> D2[Channel Details]
+  D --> D3[Agent Profile]
 
-    GroupsVol -->|"持久化"| HostFS["宿主机文件系统"]
-    SQLite -->|"持久化"| HostFS
+  E --> E1[Create Channel]
+  E --> E2[Invite Agent]
+  E --> E3[Notification Settings]
+  E --> E4[Archive Confirm]
 ```
 
-### 1.2 组件交互
+### 2.2 模块职责边界
 
-1.  **前端 (Next.js App Router)**: 处理 UI 渲染、认证和用户交互。
-2.  **后端 (Next.js API Routes)**: 作为 BFF (Backend for Frontend)，通过 Prisma 处理数据库操作和文件系统操作。
-3.  **实时层 (Socket.io)**: 管理聊天流和 Agent 状态更新的双向通信。
-4.  **数据层**:
-    - **SQLite**: 用于持久化结构化数据（Agent、任务、消息）的共享数据库。
-    - **文件系统**: 存储 Agent 配置 (`CLAUDE.md`, `sender-allowlist.json`) 和上传的图片。
-5.  **NanoClaw Core**: 现有的 Agent 运行时，在单独容器中运行，但共享数据卷和网络。
+| 模块            | MUST 包含                                    | MUST NOT 包含          |
+| --------------- | -------------------------------------------- | ---------------------- |
+| Channel Details | 频道元数据、成员、频道任务、频道沙箱、归档   | Agent Soul、全局白名单 |
+| Agent Profile   | Soul、全局白名单、Agent 元数据、Agent 级任务 | 频道成员配置、频道归档 |
+| Thread Drawer   | 线程消息流、线程未读、线程归档               | 主会话消息批量管理     |
 
-## 2. 数据库设计
+## 3. 系统架构设计
 
-### 2.1 实体关系图 (ERD)
+### 3.1 组件拓扑
 
 ```mermaid
-erDiagram
-    RegisteredGroup ||--o{ ScheduledTask : has
-    RegisteredGroup ||--o{ Message : has
-    RegisteredGroup {
-        string jid PK
-        string name
-        string folder
-        string trigger
-        datetime added_at
-        boolean is_main
-        json container_config
-    }
-    ScheduledTask {
-        string id PK
-        string group_folder FK
-        string prompt
-        string schedule_type
-        string schedule_value
-        string status
-        datetime next_run
-        datetime last_run
-    }
-    Message {
-        string id PK
-        string chat_jid FK
-        string sender
-        string content
-        datetime timestamp
-        boolean is_from_me
-    }
-    Chat {
-        string jid PK
-        string name
-        datetime last_message_time
-    }
+graph TD
+  User[Browser] --> Nginx[Nginx/Ingress]
+  Nginx --> WebUI[Next.js WebUI + BFF]
+  WebUI --> Socket[Socket.io Server]
+  WebUI --> SQLite[(SQLite)]
+  WebUI --> FS[(Local Filesystem)]
+  WebUI --> NanoClaw[NanoClaw Core]
+  NanoClaw --> MiniMax[MiniMax API]
+  SQLite --> Backup[Backup Storage on Host]
+  FS --> Backup
 ```
 
-### 2.2 Prisma Schema
+### 3.1.1 C4-Context 视图
 
-```prisma
-datasource db {
-  provider = "sqlite"
-  url      = "file:/workspace/project/store/messages.db"
-}
-
-generator client {
-  provider = "prisma-client-js"
-}
-
-model RegisteredGroup {
-  jid             String   @id
-  name            String
-  folder          String
-  trigger         String
-  added_at        DateTime @default(now())
-  is_main         Boolean  @default(false)
-  container_config String? // JSON 字符串
-
-  tasks           ScheduledTask[]
-  messages        Message[]
-
-  @@map("registered_groups")
-}
-
-model ScheduledTask {
-  id              String   @id @default(uuid())
-  group_folder    String
-  chat_jid        String
-  prompt          String
-  schedule_type   String   // cron, interval, once
-  schedule_value  String
-  status          String   // active, paused
-  next_run        DateTime?
-  last_run        DateTime?
-  created_at      DateTime @default(now())
-
-  group           RegisteredGroup @relation(fields: [chat_jid], references: [jid])
-
-  @@map("scheduled_tasks")
-}
-
-model Message {
-  id              String   @id @default(uuid())
-  chat_jid        String
-  sender          String
-  content         String
-  timestamp       DateTime @default(now())
-  is_from_me      Boolean
-
-  group           RegisteredGroup @relation(fields: [chat_jid], references: [jid])
-
-  @@map("messages")
-}
-
-model Chat {
-  jid               String   @id
-  name              String?
-  last_message_time DateTime?
-
-  @@map("chats")
-}
+```mermaid
+graph LR
+  User[Workspace User] --> WebUI[NanoClaw WebUI System]
+  Admin[Workspace Admin] --> WebUI
+  WebUI --> NanoClaw[NanoClaw Core System]
+  NanoClaw --> MiniMax[MiniMax API]
+  WebUI --> HostFS[Host Filesystem]
+  WebUI --> SQLite[(SQLite DB)]
 ```
 
-## 3. UI 设计
+### 3.1.2 C4-Container 视图
 
-### 3.1 线框图
-
-#### 聊天控制台
-
-- **侧边栏**:
-  - 顶部搜索栏。
-  - "Agents (联系人)" 列表：显示可用的 AI 助手（如默认的 Andy）。点击进入 Agent 全局详情页。
-  - "Channels (频道)" 列表：显示创建的群组/频道。点击进入聊天界面。
-  - 底部用户资料/设置。
-- **主区域 (聊天)**:
-  - 头部：频道名称，成员概览，"View Details (查看详情)"按钮。
-  - 消息列表：消息气泡滚动区域。
-  - 输入区：文本框，图片上传，发送按钮。支持 `@` 提及已加入频道的 Agent（无成员时不弹出）。
-  - **输入态提示**：当 LLM 正在处理时，输入框上方或消息列表底部显示“Agent 正在输入...”动画。
-
-#### 详情页设计 (Slack 风格)
-
-- **频道详情页 (Channel Details)**:
-  - **入口**: 点击频道头部的 "View Details"。
-  - **内容**:
-    - **概览 (About)**: 频道名称，文件夹路径，创建时间。**新增“删除频道”按钮**（底部红色区域，带二次确认）。
-    - **成员 (Members)**: **新增模块**。显示当前频道内的 Agent 列表。每个成员条目包含头像、名称和“移除”按钮。顶部提供“添加成员/邀请 Agent”按钮。
-    - **任务 (Integrations/Tasks)**: 该频道的定时任务管理。
-    - **沙箱 (Settings)**: 该频道的 Docker 挂载配置。
-
-- **Agent 全局详情页 (Agent Profile)**:
-  - **入口**: 点击侧边栏 Agent，或频道内 Agent 头像。
-  - **内容**:
-    - **头部**: Agent 头像与名称。
-    - **记忆 (Global Memory)**: 全局 `CLAUDE.md` 编辑器。
-    - **安全**: 全局 `sender-allowlist.json` 配置。
-
-### 3.2 交互流程
-
-#### 3.2.1 频道创建与路由
-
-1. 用户点击侧边栏“+”创建频道。
-2. 填写名称和 ID，点击确认。
-3. 前端调用 API 创建群组。
-4. **关键修正**: 创建成功后，路由立即跳转至 `/dashboard/chat/[new_jid]`，确保不出现 404。
-5. 若后端尚未同步，前端应显示 Loading 状态并轮询直到频道可用。
-
-#### 3.2.2 频道成员管理
-
-1. **邀请**: 在频道详情页点击“Add People”。弹出模态框列出全局可用 Agent。选择并确认后，API 更新 `container_config.agents`。
-2. **移除**: 在成员列表中点击“Remove”。二次确认后，API 更新配置。
-3. **效果**: 成员变动后，`@mention` 列表实时更新。若频道无成员，输入 `@` 不触发任何动作。
-
-#### 3.2.3 频道删除
-
-1. 在频道详情页底部点击“Delete Channel”。
-2. 弹出高风险警告模态框（需输入频道名确认）。
-3. 确认后调用 DELETE API。
-4. 成功后跳转至 Dashboard 首页，侧边栏移除该频道。
-
-#### 3.2.4 发送消息与输入态
-
-1. 用户输入 -> 回车 -> 乐观 UI 更新。
-2. Socket.io 发送 `client:message` -> 服务端确认。
-3. **输入态**: 服务端收到 LLM 开始处理信号 -> Socket.io 广播 `agent:typing` -> 前端显示“正在输入...”。
-4. NanoClaw Core 流式输出 -> Socket.io 发送 `agent:response` -> UI 追加消息并移除输入态。
-
-5. **发送消息**:
-   - 用户输入 -> 回车 -> 乐观 UI 更新。
-   - Socket.io 发送 `client:message` -> 服务端确认。
-   - 服务端存入 DB -> 触发 NanoClaw Core（通过 IPC 或共享 DB 轮询）。
-   - NanoClaw Core 流式输出 -> Socket.io 发送 `agent:token` -> UI 追加到最后一条消息。
-
-## 4. 技术实现细节
-
-### 4.1 流式响应
-
-- **机制**: Server-Sent Events (SSE) 或 Socket.io 流。
-- **实现**:
-  - NanoClaw Core 将输出写入共享日志文件或 IPC 管道。
-  - WebUI 后端监听此文件/管道。
-  - 有新数据时，后端通过 Socket.io `agent:typing` 和 `agent:response` 推送给前端。
-  - 前端累积数据块并渲染 Markdown。
-
-### 4.2 图片处理
-
-- **上传**:
-  - POST `/api/upload` 接收 `multipart/form-data`。
-  - 文件保存至 `groups/{agent_folder}/uploads/{timestamp}_{name}.ext`。
-  - 返回相对于容器挂载的本地路径。
-- **发送**:
-  - 消息内容包含图片引用：`![image](/uploads/...)`。
-  - NanoClaw Core 解析此引用并将文件路径传递给 MiniMax API。
-- **MiniMax API 交互格式**:
-  - 当消息包含图片时，构建如下 Payload：
-    ```json
-    {
-      "messages": [
-        {
-          "role": "user",
-          "content": [
-            { "type": "text", "text": "用户文本消息..." },
-            {
-              "type": "image_url",
-              "image_url": { "url": "https://.../image.jpg" }
-            }
-          ]
-        }
-      ]
-    }
-    ```
-  - 注意：对于私有化部署，可能需要将本地图片转换为 Base64 或提供内部可访问的 URL。
-
-### 4.3 SQLite 并发
-
-- **问题**: SQLite 同一时间只允许一个写入者。
-- **解决方案**:
-  - 启用 **WAL (Write-Ahead Logging) 模式**: `PRAGMA journal_mode=WAL;`。
-  - 在 Next.js 后端使用 Prisma 单例实例。
-  - 针对 `SQLITE_BUSY` 错误实现带指数退避的重试逻辑。
-
-### 4.4 Socket.io 与 Next.js 集成
-
-- **挑战**: Next.js App Router 优先支持 Serverless，原生不支持长连接 WS 服务。
-- **解决方案**:
-  - 使用单独的自定义服务器（例如使用 `http` 模块的 `server.ts`）来初始化 Socket.io。
-  - 或者，如果通过 Docker 部署，运行一个独立的 Node.js 进程用于 Socket.io，通过 Redis 或内部 HTTP 与 Next.js 通信。
-  - _决策_: 针对此私有化 MVP，我们将使用 **自定义服务器** (`server.ts`) 包装 Next.js 应用，允许在同一端口上同时支持 HTTP 和 WS。
-
-#### 4.4.1 Socket.io Server 初始化示例
-
-```typescript
-import { createServer } from 'http';
-import next from 'next';
-import { Server } from 'socket.io';
-
-const dev = process.env.NODE_ENV !== 'production';
-const hostname = 'localhost';
-const port = 3000;
-const app = next({ dev, hostname, port });
-const handler = app.getRequestHandler();
-
-app.prepare().then(() => {
-  const httpServer = createServer(handler);
-  const io = new Server(httpServer);
-
-  io.on('connection', (socket) => {
-    console.log('Client connected', socket.id);
-    socket.on('client:message', (data) => {
-      // Handle message
-    });
-  });
-
-  httpServer.listen(port, () => {
-    console.log(`> Ready on http://${hostname}:${port}`);
-  });
-});
+```mermaid
+graph TD
+  Browser[Browser SPA] --> BFF[Next.js BFF/API]
+  Browser --> Socket[Socket.io Gateway]
+  BFF --> Auth[Auth Module]
+  BFF --> Repo[Data Repository]
+  Repo --> SQLite[(SQLite)]
+  Repo --> FS[(Local Filesystem)]
+  Socket --> EventBus[Event Dispatcher]
+  EventBus --> NanoClaw[NanoClaw Core Adapter]
+  NanoClaw --> MiniMax[MiniMax API Adapter]
 ```
 
-### 4.5 安全
+### 3.1.3 C4-Component 视图（BFF）
 
-- **认证**: NextAuth.js 配合 `CredentialsProvider`。
-  - 从 `AUTH_SECRET` 环境变量读取哈希密码。
-  - 通过 JWT（加密 Cookie）管理会话。
-- **中间件**: Next.js Middleware 保护 `/api/*` 和仪表盘路由。
+```mermaid
+graph TD
+  API[Route Handlers] --> Service[Domain Services]
+  Service --> SessionSvc[Session Service]
+  Service --> MessageSvc[Message Service]
+  Service --> NotifySvc[Notification Service]
+  Service --> AuditSvc[Audit Service]
+  Service --> SearchSvc[Search Service]
+  Service --> FileSvc[File Service]
+  Service --> PolicySvc[RBAC Policy Service]
+  SessionSvc --> Repo[Repository Layer]
+  MessageSvc --> Repo
+  NotifySvc --> Repo
+  AuditSvc --> Repo
+  SearchSvc --> Repo
+  FileSvc --> Repo
+  PolicySvc --> Repo
+```
+
+### 3.2 技术策略
+
+1. Web 层使用 Next.js App Router；实时层使用同进程 Socket.io 或独立进程桥接。
+2. 数据读写由 BFF 收敛，避免前端直连 DB 导致并发失控。
+3. SQLite 启用 WAL + 重试退避；文件操作统一走安全路径校验。
+4. 所有通知、未读、提及状态通过事件总线统一分发。
+5. BFF 与 NanoClaw Core 职责边界 MUST 通过接口契约固定，WebUI MUST NOT 绕过 BFF 直连 Core 内部存储。
+
+## 4. 核心交互流程
+
+### 4.1 登录流程
+
+```mermaid
+sequenceDiagram
+  participant U as User
+  participant W as WebUI
+  participant A as Auth Layer
+  U->>W: 打开受保护页面
+  W->>A: 校验会话
+  A-->>W: 未认证
+  W-->>U: 跳转登录页
+  U->>W: 提交凭据
+  W->>A: 验证凭据
+  A-->>W: 返回会话令牌
+  W-->>U: 进入 Dashboard
+```
+
+### 4.2 频道创建流程
+
+```mermaid
+sequenceDiagram
+  participant U as User
+  participant UI as WebUI
+  participant API as BFF API
+  participant DB as SQLite
+  U->>UI: 提交频道创建表单
+  UI->>API: POST /channels
+  API->>DB: 写入频道记录
+  DB-->>API: 成功
+  API-->>UI: 返回 channel_id
+  UI-->>U: 跳转 /dashboard/chat/{channel_id}
+```
+
+### 4.3 发起私信流程
+
+```mermaid
+sequenceDiagram
+  participant U as User
+  participant UI as WebUI
+  participant API as BFF API
+  participant DB as SQLite
+  U->>UI: 选择 Agent 并发起 DM
+  UI->>API: POST /dm/sessions
+  API->>DB: 创建/复用 DM 会话
+  API-->>UI: 返回 dm_id
+  UI-->>U: 打开 DM 主视图
+```
+
+### 4.4 线程对话流程
+
+```mermaid
+sequenceDiagram
+  participant U as User
+  participant UI as WebUI
+  participant API as BFF API
+  participant S as Socket.io
+  participant N as NanoClaw
+  U->>UI: 在线程中回复
+  UI->>API: POST /threads/{id}/messages
+  API->>S: 发布 thread:message
+  S->>N: 转发消息
+  N-->>S: 流式 token
+  S-->>UI: thread:token
+  UI-->>U: 右侧抽屉增量渲染
+```
+
+### 4.5 Agent 管理流程
+
+```mermaid
+sequenceDiagram
+  participant U as Admin
+  participant UI as WebUI
+  participant API as BFF API
+  participant FS as Local FS
+  U->>UI: 编辑 Soul/白名单/沙箱
+  UI->>API: PATCH /agents/{id}
+  API->>FS: 写入 CLAUDE.md/sender-allowlist.json
+  API-->>UI: 返回成功与审计ID
+  UI-->>U: 显示保存成功
+```
+
+## 5. UI 组件规范（Slack 对齐）
+
+1. 导航组件 MUST 使用三层结构：Workspace 顶栏、分组侧边栏、内容区。
+2. 消息气泡 SHOULD 区分用户、Agent、系统消息三种视觉层级。
+3. 输入框 MUST 支持多行输入、快捷键发送、提及补全、文件拖拽上传。
+4. 右侧抽屉 MUST 用于线程与详情，避免覆盖主会话。
+5. 列表组件 MUST 支持未读角标、静音标识、在线状态点。
+6. 模态组件 MUST 用于高风险动作确认（归档、删除、权限变更）。
+
+## 6. 数据流转时序
+
+### 6.1 实时消息时序
+
+```mermaid
+sequenceDiagram
+  participant UI as Frontend
+  participant S as Socket.io
+  participant B as BFF
+  participant N as NanoClaw Core
+  participant DB as SQLite
+  UI->>S: client:message
+  S->>B: ACK + 写入请求
+  B->>DB: insert message
+  B->>N: dispatch task/message
+  N-->>S: agent:typing
+  N-->>S: agent:token(stream)
+  S-->>UI: token chunks
+  B->>DB: finalize message status
+```
+
+### 6.2 本地存储时序
+
+1. 上传文件进入 BFF，进行类型和大小校验。
+2. 校验通过后写入本地卷并生成元数据记录。
+3. 消息引用文件 ID，而非直接拼接不安全路径。
+4. 下载时通过鉴权网关回源，防止越权读取。
+
+### 6.3 Socket 事件契约表
+
+| 事件名 | 方向 | Payload 核心字段 | 版本 | ACK | 幂等键 | 顺序约束 |
+| --- | --- | --- | --- | --- | --- | --- |
+| `client:message` | Client -> Server | `message_id, session_id, text, mentions, attachments` | v1 | MUST | `message_id` | 按 `session_id + client_seq` 单调 |
+| `server:ack` | Server -> Client | `message_id, status, server_ts, trace_id` | v1 | MUST | `message_id` | 必须先于 token 返回 |
+| `agent:typing` | Server -> Client | `session_id, agent_id, typing_state, trace_id` | v1 | SHOULD | `session_id+agent_id+state_ts` | 与 token 同会话有序 |
+| `agent:token` | Server -> Client | `message_id, token_seq, token, done` | v1 | MUST | `message_id+token_seq` | `token_seq` 严格递增 |
+| `thread:message` | Client -> Server | `message_id, thread_id, text` | v1 | MUST | `message_id` | 线程内单调 |
+| `notify:dispatch` | Server -> Client | `event_id, level, reason, session_id` | v1 | SHOULD | `event_id` | 可乱序，按时间戳归并 |
+
+## 7. 数据模型分层与索引策略
+
+### 7.1 实体分层
+
+1. 会话层：`Channel`、`DM`、`Thread`。
+2. 内容层：`Message`、`Reaction`、`Attachment`。
+3. 状态层：`NotificationState`、`UnreadCounter`、`Presence`。
+4. 治理层：`RoleBinding`、`AuditLog`、`RetentionPolicy`。
+
+### 7.2 主键与索引建议
+
+| 实体 | 主键 | 核心索引 | 设计目标 |
+| --- | --- | --- | --- |
+| Channel | `channel_id` | `(workspace_id, visibility, archived_at)` | 频道列表与归档检索 |
+| DM | `dm_id` | `(workspace_id, member_hash, last_message_ts)` | 快速定位 1v1/Group DM |
+| Thread | `thread_id` | `(root_message_id, archived_at, last_reply_ts)` | 线程抽屉与未读 |
+| Message | `message_id` | `(session_id, created_ts)`、`(sender_id, created_ts)` | 时序加载与发送者过滤 |
+| Reaction | `reaction_id` | `(message_id, emoji, actor_id)` 唯一 | 并发去重与计数 |
+| NotificationState | `event_id` | `(user_id, read_state, created_ts)` | 通知中心与未读角标 |
+| AuditLog | `audit_id` | `(workspace_id, actor_id, created_ts)`、`(object_type, object_id)` | 审计追溯 |
+
+### 7.3 幂等与顺序保证
+
+1. 消息幂等：`message_id` MUST 全局唯一，重复提交返回同一 ACK。
+2. 线程幂等：`thread_id + message_id` MUST 作为线程写入幂等键。
+3. token 顺序：`token_seq` MUST 严格递增；乱序包 MUST 按缓存重排后渲染。
+4. 去重策略：客户端与服务端 MUST 双端去重，窗口 SHOULD 为 10 分钟。
+5. 事件重放：重连后 MUST 基于 `last_acked_seq` 拉取增量事件。
+## 8. 权限矩阵
+
+| 操作               | 工作区管理员 | 频道管理员 | 普通成员 |
+| ------------------ | ------------ | ---------- | -------- |
+| 创建公开频道       | 允许         | 允许       | 允许     |
+| 创建私有频道       | 允许         | 允许       | 禁止     |
+| 归档频道           | 允许         | 允许       | 禁止     |
+| 物理删除频道       | 允许         | 禁止       | 禁止     |
+| 邀请/移除 Agent    | 允许         | 允许       | 禁止     |
+| 编辑 Agent Soul    | 允许         | 禁止       | 禁止     |
+| 管理白名单         | 允许         | 禁止       | 禁止     |
+| 查看审计日志       | 允许         | 禁止       | 禁止     |
+| 发送消息/线程回复  | 允许         | 允许       | 允许     |
+| 设置个人通知与静音 | 允许         | 允许       | 允许     |
+
+## 9. 异常处理设计
+
+1. 断网重连：客户端 MUST 维护未 ACK 队列，重连后按消息 ID 去重补发。
+2. 流式中断：UI MUST 保留已接收片段，并提供“继续生成”操作。
+3. Agent 超时：系统 MUST 标记超时状态并写入审计日志。
+4. API 失败：所有失败响应 MUST 返回错误码、可读信息、追踪 ID。
+
+## 10. 部署运行约束
+
+### 10.1 资源配额建议（单工作区最小生产规格）
+
+| 组件 | CPU | 内存 | 磁盘IO | 说明 |
+| --- | --- | --- | --- | --- |
+| WebUI + BFF | 2 vCPU | 4 GB | 1000 IOPS | 包含 API 与页面渲染 |
+| Socket.io Gateway | 1 vCPU | 2 GB | 500 IOPS | 高峰连接与事件广播 |
+| SQLite + 文件卷 | 1 vCPU | 2 GB | 1500 IOPS | WAL 与文件索引读写 |
+
+### 10.2 容量预估公式
+
+1. 消息存储量 `S_msg = U * M_d * R * D`  
+   其中：`U`=活跃用户数，`M_d`=人均日消息数，`R`=单条消息平均KB，`D`=保留天数。
+2. 文件存储量 `S_file = F_d * F_avg * D`  
+   其中：`F_d`=日上传文件数，`F_avg`=平均文件大小MB。
+3. 峰值连接 `C_peak = U * K`  
+   其中：`K`=并发连接系数（建议 1.2~1.5）。
+
+### 10.3 运维门禁
+
+1. CPU 使用率 P95 SHOULD < 70%。
+2. 内存使用率 P95 SHOULD < 75%。
+3. Socket 消息丢包率 MUST < 0.1%。
+4. SQLite `busy_timeout` 触发率 SHOULD < 1%。
+
+## 11. 兼容性要求
+
+1. 浏览器兼容：Chrome/Edge 最近两个稳定版本 MUST 支持全部 P0 流程。
+2. 响应式适配：宽度 1280 以上为三栏；768-1279 为双栏；767 以下抽屉化导航。
+3. 部署兼容：单机 Docker Compose 与内网多容器模式 MUST 可运行。
+4. 数据兼容：现有 SQLite 表与文件结构 MUST 可无损迁移。
+
+## 12. 风险说明
+
+1. SQLite 锁竞争风险：通过 WAL + 限流 + 写入收敛治理。
+2. 文件体积增长风险：通过配额阈值与归档策略治理。
+3. 交互复杂度增长风险：以统一组件协议与状态机约束复杂度。
+
+## 13. 变更记录
+
+| 版本 | 日期       | 变更人       | 说明                                               |
+| ---- | ---------- | ------------ | -------------------------------------------------- |
+| v2.0 | 2026-03-15 | 架构与文档组 | 全量重构信息架构、流程、时序、权限矩阵与兼容性约束 |

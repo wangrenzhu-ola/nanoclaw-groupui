@@ -15,6 +15,9 @@
     "prepare": "husky",
     "setup": "tsx setup/index.ts",
     "auth": "tsx src/whatsapp-auth.ts",
+    "r1:acceptance": "tsx src/r1-acceptance.ts",
+    "r2:acceptance": "tsx src/r2-acceptance.ts",
+    "r3:acceptance": "tsx src/r3-acceptance.ts",
     "test": "vitest run",
     "test:watch": "vitest"
   },

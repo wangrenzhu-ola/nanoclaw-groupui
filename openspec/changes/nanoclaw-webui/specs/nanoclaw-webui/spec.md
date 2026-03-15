@@ -1,315 +1,429 @@
-# NanoClaw WebUI 规格说明书
-
-本规格说明书基于 `01_Proposal.md` 提案，详细定义了 NanoClaw WebUI 的功能、数据、API 及交互规范。系统旨在为 NanoClaw 提供一套完全私有化、可视化的管理界面，实现沉浸式聊天体验与全功能 Agent 管理。
+# Delta for NanoClaw WebUI
 
 ## ADDED Requirements
 
-### Requirement: 实时聊天交互 (Real-time Chat Interaction)
+### Requirement: NCW-V2 Baseline Capability Set
 
-系统 MUST 提供用户与 Agent 之间的实时聊天能力，支持文本消息的发送与流式响应渲染，并具备输入状态提示。
+The system MUST deliver the NCW-FR-001~NCW-FR-028 capability set for private Slack-style AI collaboration, and MUST keep compatibility with Socket.io, local persistence, and MiniMax integration.
 
-#### Scenario: 实时聊天交互
+#### Scenario: Baseline capability set is available
 
-Given 用户已登录 WebUI
-When 他们在聊天输入框发送消息
-Then 消息应通过 Socket.io 发送到 NanoClaw 后端
-And 后端响应应实时流式传输回 UI
-And 响应中的 Markdown 内容应被正确渲染
+- GIVEN the change `nanoclaw-webui` is deployed
+- WHEN QA executes baseline acceptance suites
+- THEN all baseline requirements NCW-FR-001~NCW-FR-028 MUST be testable and traceable
+- AND deployment compatibility constraints MUST be satisfied
 
-#### Scenario: LLM 输入态提示
+# NanoClaw WebUI 规格说明书（spec.md）
 
-Given 用户已发送消息，等待 LLM 回复
-When LLM 正在处理或生成内容但尚未返回文本时
-Then 聊天界面底部应显示“Agent正在输入...”的提示
-And 当收到流式回复内容或回复结束时，提示应自动消失
+## 0. 文档元数据
 
-### Requirement: 群聊管理 (Group Chat Management)
+| 字段     | 内容                                                    |
+| -------- | ------------------------------------------------------- |
+| 文档 ID  | OSP-NCW-SPEC-001                                        |
+| 版本     | v2.0                                                    |
+| 状态     | Draft-Ready for Review                                  |
+| 生效日期 | 2026-03-15                                              |
+| 责任人   | 产品架构组 / 技术架构组 / QA 负责人                     |
+| 需求规范 | RFC 2119（MUST / MUST NOT / SHOULD / SHOULD NOT / MAY） |
+| 场景规范 | BDD（Given-When-Then）                                  |
 
-系统 MUST 允许用户创建、删除和管理包含多个 Agent 的群组聊天（频道），支持成员的增删。
+## 1. 范围边界
 
-#### Scenario: 群聊创建与自动跳转
+1. 本规格覆盖 NanoClaw WebUI 的会话、消息、权限、通知、搜索、文件与部署验收要求。
+2. 本规格 MUST 兼容既有 NanoClaw 私有化架构，不改变 Core 语义。
+3. 本规格 MUST NOT 引入第三方云存储或云消息中间件依赖。
 
-Given 用户在聊天控制台点击“创建群组”
-When 输入有效名称并确认创建
-Then 系统应在后台创建群组数据
-And 页面应自动无缝跳转至新创建的群组聊天页
-And 不应出现 404 或页面加载错误
+## 2. 术语定义
 
-#### Scenario: 群聊删除
+| 术语      | 定义                                               |
+| --------- | -------------------------------------------------- |
+| Workspace | 私有化部署实例内的协作域                           |
+| Channel   | 频道会话，分公开（Public）与私有（Private）        |
+| DM        | 私信会话，包含 1v1 与 Group DM                     |
+| Thread    | 由单条主消息派生的子会话                           |
+| Agent     | NanoClaw RegisteredGroup 语义实体                  |
+| Soul      | Agent 全局人格配置文件 `groups/{folder}/CLAUDE.md` |
+| Sandbox   | Agent 容器挂载与隔离配置                           |
+| Audit Log | 关键操作审计记录（操作者、时间、内容、IP）         |
 
-Given 用户是群组管理员或创建者
-When 在频道详情页点击“删除频道”并确认二次弹窗
-Then 该频道应从侧边栏移除
-And 相关的聊天记录和任务数据应被清理或归档
-And 页面应跳转至默认页或“所有频道”页
+## 3. 依赖与约束
 
-### Requirement: @提及与全员广播（@mention & @everyone Broadcast）
+1. 前端 MUST 基于 Next.js App Router 与现有 UI 组件体系实现。
+2. 实时层 MUST 使用 Socket.io，并支持 ACK 与重连恢复。
+3. 数据层 MUST 使用 SQLite 与本地文件系统。
+4. LLM 接入 MUST 兼容 MiniMax API 既有调用方式。
+5. 部署 MUST 支持 Docker Compose 与容器网络互通。
 
-系统 MUST 支持在群聊中 @提及特定 Agent。**特别约束：当频道内无 Agent 成员时，禁止触发 @提及功能。**
+## 4. 功能需求（RFC 2119）
 
-#### Scenario: @单个Agent定向触发
+### 4.1 会话结构与导航
 
-Given 用户在群聊会话中且群内**至少有一名 Agent 成员**
-When 他们输入`@`
-Then 应弹出当前频道内的 Agent 成员列表供选择
-When 选择指定Agent发送消息
-Then 被@的Agent应被定向触发响应
+#### Requirement NCW-FR-001: 侧边栏分区
 
-#### Scenario: 空频道禁止 @提及
+系统 MUST 将侧边栏分为 `Channels`、`Direct Messages`、`Agents` 三个逻辑分区；各分区数据 MUST 独立加载与缓存。
 
-Given 用户在一个**没有任何 Agent 成员**的频道中
-When 他们输入`@`
-Then **系统不应弹出任何提及列表**
-And 无法选中或触发任何 Agent
-And 界面应（可选）提示“请先邀请 Agent 加入频道”
+#### Requirement NCW-FR-002: 私信能力
 
-### Requirement: 频道成员管理 (Channel Member Management)
+系统 MUST 支持用户与 Agent 的 1v1 DM；系统 MUST 支持 2 人及以上 Group DM，并与频道数据隔离。
 
-系统 MUST 在频道详情页提供成员列表，并支持对 Agent 成员的邀请和移除，交互对标 Slack。
+#### Requirement NCW-FR-003: 频道类型与归档
 
-#### Scenario: 查看频道成员列表
+系统 MUST 支持公开频道与私有频道；频道关闭操作 SHOULD 采用归档（Archive）代替物理删除；物理删除 MUST 仅限管理员执行。
 
-Given 用户在频道详情页
-When 点击“成员 (Members)”标签或模块
-Then 应列出当前频道内的所有 Agent 成员
-And 每个成员应显示头像、名称及在线状态
+#### Scenario: 创建公开频道成功
 
-#### Scenario: 邀请 Agent 加入频道
+Given 用户角色为工作区管理员  
+When 用户创建公开频道并提交合法名称  
+Then 频道 MUST 在 2 秒内显示于 `Channels` 列表  
+And 系统 MUST 自动跳转至该频道会话页且不出现 404
 
-Given 用户在频道详情页或聊天页
-When 点击“添加成员”或“邀请 Agent”
-Then 应弹出全局可用 Agent 列表
-When 选择 Agent 并确认
-Then 该 Agent 应加入频道成员列表
-And 聊天区域应显示“xxx 已加入频道”的系统消息
-And 此时该 Agent 可被 @提及
+#### Scenario: 私有频道越权访问失败
 
-#### Scenario: 移除频道成员
+Given 用户不是目标私有频道成员  
+When 用户通过 URL 直接访问频道页面  
+Then 系统 MUST 返回 403 页面  
+And 页面 MUST 不渲染任何频道消息内容
 
-Given 用户在频道详情页的成员列表中
-When 对某个 Agent 点击“移除”并确认
-Then 该 Agent 应从成员列表中消失
-And 该 Agent 不再响应频道的 @everyone 消息
-And 该 Agent 不再出现在 @提及列表中
+#### Scenario: 频道归档边界
 
-#### Scenario: @everyone全员广播
+Given 频道已有历史消息与文件  
+When 频道管理员执行归档  
+Then 频道 MUST 从默认会话列表隐藏  
+And 历史数据 MUST 可被管理员检索恢复
 
-Given 用户在群聊会话中
-When 他们输入包含`@everyone`的消息并发送
-Then 群内所有Agent都应被触发响应
-And 消息中应高亮显示`@everyone`标识
+### 4.2 线程（Threads）
 
-### Requirement: Slack 风格交互界面 (Slack-like Interaction UI)
+#### Requirement NCW-FR-004: 线程视图
 
-系统 MUST 提供类似于 Slack 的频道与成员分离的交互界面，明确区分“频道配置”与“Agent 详情”。
+系统 MUST 支持“基于单条消息开启线程”，线程在右侧抽屉展示；主会话与线程会话 MUST 分离渲染。
 
-#### Scenario: 频道详情查看
+#### Requirement NCW-FR-005: 线程状态
 
-Given 用户在频道聊天界面
-When 他们点击“查看详情”
-Then 应展示频道的配置信息（如名称、文件夹路径、沙箱配置、频道定时任务）
-And 不应展示 Agent 的记忆或全局安全设置
+线程 MUST 支持未读计数与归档状态；线程归档后 MUST NOT 接受新回复。
 
-#### Scenario: Agent 详情查看
+#### Scenario: 开启线程并回复
 
-Given 用户在侧边栏或频道成员列表中
-When 他们点击 Agent 头像
-Then 应进入 Agent 全局详情页
-And 应展示 Agent 的全局记忆（Global CLAUDE.md）和安全白名单
-And 支持编辑保存
+Given 频道中存在一条主消息  
+When 用户点击“在线程中回复”并发送内容  
+Then 右侧线程抽屉 MUST 打开  
+And 回复 MUST 仅写入线程消息流，不写入主频道流
 
-#### Scenario: 邀请 Agent 入群
+#### Scenario: 已归档线程禁止写入
 
-Given 用户在一个未关联 Agent 的频道中
-When 他们点击“添加 Agent”或“邀请成员”
-Then Agent 应被加入该频道
-And 用户可在该频道中使用 `@` 提及该 Agent
+Given 线程状态为 Archived  
+When 用户尝试发送新回复  
+Then 系统 MUST 拒绝写入并返回明确错误码  
+And UI MUST 显示“线程已归档，无法回复”
 
-### Requirement: 图片上传 (Image Upload)
+### 4.3 消息能力
 
-系统 MUST 支持在聊天会话中上传图片，并适配 MiniMax 2.5 的图片支持特性。
+#### Requirement NCW-FR-006: 消息操作
 
-#### Scenario: 图片上传
+系统 MUST 支持编辑、撤回、引用回复、Emoji 反应、复制、转发。
 
-Given 用户在聊天会话中
-When 他们粘贴图片或点击上传按钮
-Then 图片应在本地预览
-And 发送后，图片应上传到本地文件系统
-And 图片应显示在聊天记录中
+#### Requirement NCW-FR-007: 编辑与撤回约束
 
-### Requirement: 查看 Agent 详情 (View Agent Details)
+编辑与撤回 MUST 支持时限约束；默认时限 MAY 配置为 15 分钟。
 
-系统 MUST 显示每个 Agent 的详细信息，包括基础元数据和活跃状态。
+#### Scenario: 编辑消息成功
 
-#### Scenario: 查看 Agent 详情
+Given 用户在可编辑时限内  
+When 用户编辑并保存消息  
+Then 消息内容 MUST 更新  
+And 消息元数据 MUST 标记 `edited=true` 与编辑时间
 
-Given 用户点击侧边栏中的 Agent
-When 资料页加载时
-Then 应显示 Agent 的名称、头像和触发词
-And 应显示 Agent 的创建时间和最后活跃时间
+#### Scenario: 超时撤回失败
 
-### Requirement: Agent Soul（记忆）编辑管理
+Given 用户消息发送时间超过撤回时限  
+When 用户点击撤回  
+Then 系统 MUST 返回 `MESSAGE_RECALL_EXPIRED`  
+And 原消息 MUST 保持可见
 
-系统 MUST 支持在 Agent 资料页查看和编辑 Agent 的 Soul 内容 ([CLAUDE.md](CLAUDE.md))。
+#### Scenario: Emoji 反应并发
 
-#### Scenario: 查看与编辑Agent记忆
+Given 多用户同时对同一消息添加同一 Emoji  
+When 并发提交反应  
+Then 系统 MUST 合并计数且不产生重复用户记录
 
-Given 用户进入Agent资料页
-When 他们打开「记忆(Soul)」模块
-Then 应加载并展示该Agent对应`groups/{folder}/CLAUDE.md`的完整内容
-And 用户可通过Markdown编辑器修改内容
-And 点击保存后，修改应实时写入原CLAUDE.md文件
-And 无需重启NanoClaw服务即可生效
+### 4.4 提及体系与状态
 
-### Requirement: Agent定时任务（Scheduled Task）管理
+#### Requirement NCW-FR-008: 提及类型
 
-系统 MUST 支持在 Agent 资料页查看和管理该 Agent 关联的定时任务。
+系统 MUST 支持 `@agent`、`@everyone`、`@here` 三类提及。
 
-#### Scenario: 定时任务查看与管理
+#### Requirement NCW-FR-009: 空频道约束
 
-Given 用户进入Agent资料页
-When 他们打开「任务管理」模块
-Then 应列表展示该Agent关联的所有Scheduled Task，包含ID、Cron/Interval规则、触发Prompt、运行状态、下次执行时间
-And 用户可一键暂停/恢复指定任务
-And 用户可手动触发一次任务执行
-And 操作结果应实时同步到NanoClaw的tasks数据库表
+频道无 Agent 成员时，系统 MUST NOT 弹出 `@agent` 选择列表；系统 SHOULD 提示“请先邀请 Agent”。
 
-### Requirement: 配置 Docker 沙箱 (Configure Docker Sandbox)
+#### Requirement NCW-FR-010: `@here` 语义
 
-系统 MUST 允许管理员配置每个 Agent 的 Docker 沙箱挂载路径。
+`@here` MUST 仅触发当前频道在线 Agent，不触发离线 Agent。
 
-#### Scenario: 配置 Docker 沙箱
+#### Scenario: `@here` 精确触发
 
-Given 用户在 Agent 资料页
-When 他们编辑“Docker 沙箱”部分
-Then 他们应能够添加或删除宿主机路径挂载
-And 更改应保存到 Agent 的配置中
+Given 频道内有 2 个在线 Agent、1 个离线 Agent  
+When 用户发送包含 `@here` 的消息  
+Then 在线 Agent MUST 被触发  
+And 离线 Agent MUST NOT 被触发
 
-### Requirement: Agent权限白名单管理
+#### Scenario: 提及高亮与未读聚合
 
-系统 MUST 支持为每个 Agent 配置发送者白名单及其拦截模式。
+Given 用户在其他页面未打开目标频道  
+When 该用户被 `@agent` 或 `@here` 提及  
+Then 侧边栏 MUST 显示提及高亮  
+And 未读聚合视图 MUST 增加对应计数
 
-#### Scenario: 白名单配置
+### 4.5 未读、在线状态与静音
 
-Given 用户进入Agent资料页
-When 他们打开「权限控制」模块
-Then 应加载并展示`sender-allowlist.json`中该Agent的白名单配置
-And 用户可新增/删除允许发送者、修改触发/拦截模式
-And 保存后修改应实时写入原配置文件，无需重启服务即可生效
+#### Requirement NCW-FR-011: 未读体系
 
-### Requirement: 内部认证 (Internal Authentication)
+系统 MUST 提供频道/DM 未读角标、最近未读聚合视图、首条未读定位跳转。
 
-系统 MUST 强制执行内部访问认证，确保只有授权人员可访问管理后台。
+#### Requirement NCW-FR-012: 在线状态
 
-#### Scenario: 内部认证
+系统 MUST 展示用户与 Agent 在线状态；状态更新 SHOULD 在 5 秒内同步。
 
-Given WebUI 已部署
-When 用户访问根 URL
-Then 应提示他们通过 Basic Auth 或 NextAuth 登录
-And 只有经过身份验证的用户才能访问聊天控制台
+#### Requirement NCW-FR-013: 静音规则
 
-### Requirement: 私有化部署 (Private Deployment)
+会话静音后 MUST 抑制普通消息通知，但 MUST 保留提及类通知（可被用户策略覆盖）。
 
-系统 MUST 支持完全私有化的 Docker Compose 部署方案，确保数据不外流。
+#### Scenario: 静音后通知抑制
 
-#### Scenario: 私有化部署
+Given 用户已将频道设为静音  
+When 频道出现普通新消息  
+Then 系统 MUST 不弹出通知  
+And 未读计数 MUST 继续累加
 
-Given 系统通过 Docker Compose 运行
-When WebUI 容器启动
-Then 它应连接到 NanoClaw 后端容器
-And 它应将数据持久化到映射的本地卷
+### 4.6 搜索与文件管理
 
-## 6. 测试验收标准
+#### Requirement NCW-FR-014: 全域搜索
 
-### 6.1 功能验收标准
+系统 MUST 支持按关键词、时间范围、发送者过滤检索频道/DM/线程消息。
 
-#### 6.1.1 实时聊天交互验收
+#### Requirement NCW-FR-015: 文件管理
 
-- 验收场景：正常消息发送与流式响应
-  Given 用户已登录系统，进入与Agent的1v1会话
-  When 用户发送合法文本消息
-  Then 消息应立即展示在聊天记录中
-  And Agent响应应通过流式传输逐字渲染
-  And Markdown内容应正确格式化展示
-  验收通过条件：100%消息发送成功，流式响应无卡顿、无乱码，Markdown渲染正确
+系统 MUST 支持多类型文件上传、预览、下载、搜索；图片预览 MUST 保持兼容既有能力。
 
-- 验收场景：异常场景（API调用失败）
-  Given MiniMax API调用异常
-  When 用户发送消息
-  Then 系统应在3秒内展示友好的错误提示
-  And 不影响后续消息发送
-  验收通过条件：异常提示清晰，无系统崩溃，后续功能正常可用
+#### Scenario: 多条件检索
 
-#### 6.1.2 群聊管理验收
+Given 工作区存在 30 天消息数据  
+When 用户设置关键词 + 时间范围 + 发送者筛选  
+Then 系统 MUST 返回满足全部条件的结果  
+And 结果 MUST 按时间倒序呈现
 
-- 验收场景：创建与管理群组
-  Given 用户已登录系统
-  When 用户创建一个新群组并添加Agent
-  Then 群组应出现在侧边栏列表中
-  And 用户可在群组内发送消息
-  验收通过条件：群组创建成功，消息可正常发送至群组
+#### Scenario: 非支持类型预览降级
 
-#### 6.1.3 @提及与全员广播验收
+Given 用户上传不可内嵌预览文件类型  
+When 打开文件详情  
+Then 系统 MUST 显示基础元数据与下载入口  
+And MUST NOT 阻塞会话渲染
 
-- 验收场景：@mention特定Agent
-  Given 用户在群聊中
-  When 用户输入`@AgentName`并发送消息
-  Then 只有被提及的Agent响应
-  And 消息中Agent名称高亮显示
-  验收通过条件：仅目标Agent回复，UI显示正确
+### 4.7 通知与免打扰
 
-- 验收场景：@everyone全员广播
-  Given 用户在群聊中
-  When 用户输入`@everyone`并发送消息
-  Then 群内所有Agent均响应
-  And 消息中`@everyone`高亮显示
-  验收通过条件：所有Agent均回复，UI显示正确
+#### Requirement NCW-FR-016: 全局通知
 
-#### 6.1.4 Agent资料页管理验收
+系统 MUST 支持全局通知级别配置（全部消息、仅提及、关闭）。
 
-- 验收场景：编辑Agent记忆(Soul)
-  Given 用户在Agent资料页的记忆模块
-  When 用户修改`CLAUDE.md`内容并保存
-  Then 文件内容应实时更新
-  And Agent行为应反映新的记忆设置
-  验收通过条件：文件写入成功，Agent行为符合预期
+#### Requirement NCW-FR-017: 会话级通知
 
-- 验收场景：管理定时任务
-  Given 用户在Agent资料页的任务管理模块
-  When 用户暂停一个定时任务
-  Then 任务状态应变为Paused
-  And 数据库中该任务状态同步更新
-  验收通过条件：UI状态与数据库状态一致，任务不再触发
+系统 MUST 支持频道与 DM 级别通知覆盖策略。
 
-### 6.2 兼容性验收标准
+#### Requirement NCW-FR-018: 关键词与 DND
 
-- 验收场景：图片上传与渲染
-  Given 用户发送一张10MB内的图片
-  When 图片上传完成
-  Then 图片应在聊天窗口中正确显示缩略图
-  And 点击缩略图可查看原图
-  验收通过条件：图片上传成功，预览和原图查看功能正常
+系统 MUST 支持关键词提醒与免打扰时段；DND 时段内 MUST 延迟非紧急通知。
 
-### 6.3 安全性验收标准
+#### Requirement NCW-FR-018A: 通知冲突优先级链
 
-- 验收场景：未授权访问拦截
-  Given 用户未登录
-  When 用户尝试访问聊天控制台URL
-  Then 系统应重定向至登录页面
-  验收通过条件：未登录用户无法访问受保护页面
+系统 MUST 按以下优先级处理冲突：`用户级强制关闭通知` > `会话级静音` > `DND时段` > `提及类型规则(@everyone/@here/@agent)` > `全局默认通知级别`。
 
-- 验收场景：权限白名单配置
-  Given 用户在Agent资料页配置白名单
-  When 用户添加一个新的允许发送者
-  Then 配置文件`sender-allowlist.json`应更新
-  And 该发送者应能触发Agent
-  验收通过条件：配置文件更新正确，权限控制生效
+#### Requirement NCW-FR-018B: 会话静音与提及冲突
 
-### 6.4 私有化部署验收标准
+会话静音后，普通消息 MUST NOT 触发即时通知；`@agent` 和 `@here` MAY 触发提醒；`@everyone` SHOULD 受工作区策略门禁控制。
 
-- 验收场景：Docker Compose部署
-  Given 使用Docker Compose启动服务
-  When 所有容器状态为Up
-  Then WebUI应能连接到NanoClaw后端
-  And 数据应持久化到宿主机挂载目录
-  验收通过条件：服务互通，重启容器后数据不丢失
+#### Scenario: DND 生效
+
+Given 用户设置 22:00-08:00 为 DND  
+When 23:00 收到普通消息  
+Then 系统 MUST 不发送即时通知  
+And 08:00 后 MUST 在通知中心展示汇总提醒
+
+#### Scenario: 会话静音与@here冲突
+
+Given 用户已将频道设置为静音  
+When 用户在该频道被 `@here` 提及  
+Then 系统 MUST 按工作区策略判断是否发送即时提醒  
+And 若策略允许，通知中心 MUST 保留该提及记录
+
+#### Scenario: 用户级关闭通知覆盖其他策略
+
+Given 用户将全局通知设置为“关闭”  
+When 任意频道发生普通消息或提及消息  
+Then 系统 MUST 不发送即时推送  
+And 所有未读状态 MUST 继续累计
+
+### 4.8 权限与审计
+
+#### Requirement NCW-FR-019: RBAC
+
+系统 MUST 提供工作区管理员、频道管理员、普通成员三类角色模型。
+
+#### Requirement NCW-FR-020: 审计日志
+
+关键操作 MUST 写入审计日志，至少包含操作者、时间、对象、变更内容、来源 IP。
+
+#### Requirement NCW-FR-020A: 角色旅程与页面可见性
+
+系统 MUST 提供管理员、频道管理员、普通成员的页面可见性差异规则，且规则 MUST 与 RBAC 权限一致。
+
+#### Scenario: 管理员旅程
+
+Given 用户角色为工作区管理员  
+When 用户进入控制台  
+Then 用户 MUST 可见审计页、权限管理页、频道归档与物理删除入口  
+And 用户 MUST 可访问 Agent 全局配置页
+
+#### Scenario: 频道管理员旅程
+
+Given 用户角色为频道管理员  
+When 用户进入其管理的频道详情  
+Then 用户 MUST 可见频道成员管理与频道归档入口  
+And 用户 MUST NOT 可见工作区审计总览与全局权限策略页
+
+#### Scenario: 普通成员旅程
+
+Given 用户角色为普通成员  
+When 用户进入控制台  
+Then 用户 MUST 可见消息发送、线程回复、个人通知设置入口  
+And 用户 MUST NOT 可见频道删除、权限变更、Agent全局配置入口
+
+#### Scenario: 频道权限控制
+
+Given 用户角色为普通成员  
+When 用户尝试修改频道权限或归档频道  
+Then 系统 MUST 返回权限不足  
+And 审计日志 MUST 记录失败尝试
+
+#### Scenario: 审计查询
+
+Given 管理员打开审计页面  
+When 按对象 ID 与时间范围查询  
+Then 系统 MUST 返回可追溯记录  
+And 记录字段 MUST 完整
+
+### 4.9 Agent 全局管理
+
+#### Requirement NCW-FR-021: Agent 详情边界
+
+Agent 全局详情页 MUST 展示 Soul、全局安全白名单、基础元数据；频道详情页 MUST NOT 展示这些全局配置。
+
+#### Requirement NCW-FR-022: Soul 与白名单
+
+系统 MUST 支持读写 `CLAUDE.md` 与 `sender-allowlist.json`，写入后无需重启生效。
+
+#### Requirement NCW-FR-023: 任务与沙箱
+
+系统 MUST 支持 ScheduledTask 查看/暂停/恢复/手动触发；MUST 支持 Sandbox 挂载配置管理。
+
+#### Scenario: Soul 修改即时生效
+
+Given 用户有 Agent 管理权限  
+When 用户编辑并保存 Soul  
+Then 文件 MUST 在 1 秒内持久化  
+And 后续对话 MUST 使用新配置
+
+### 4.10 异常与恢复
+
+#### Requirement NCW-FR-024: 断网重连
+
+客户端断网重连后 MUST 自动恢复 Socket.io 连接并补拉未确认消息。
+
+#### Requirement NCW-FR-025: 流式中断处理
+
+流式响应中断时，系统 MUST 提供重试或继续生成入口，并保留已生成片段。
+
+#### Requirement NCW-FR-026: Agent 无响应
+
+Agent 在超时窗口内无响应时，系统 MUST 返回可识别错误状态并允许用户重试。
+
+#### Scenario: 重连补偿
+
+Given 用户发送消息后发生网络断开  
+When 网络恢复并重连成功  
+Then 客户端 MUST 同步服务端 ACK 状态  
+And 未 ACK 消息 MUST 执行一次性补发
+
+### 4.11 认证与私有化部署
+
+#### Requirement NCW-FR-027: 内部认证
+
+系统 MUST 使用 Basic Auth 或 NextAuth Credentials 保护管理与 API 路径。
+
+#### Requirement NCW-FR-028: 私有化部署
+
+系统 MUST 支持 Docker Compose 私有部署、容器互通、数据持久化与备份恢复。
+
+#### Scenario: 未认证访问拦截
+
+Given 用户未登录  
+When 用户访问受保护页面  
+Then 系统 MUST 重定向到登录页  
+And API MUST 返回 401/403
+
+## 5. API 与数据约束
+
+1. 消息、线程、反应、通知、审计 API MUST 返回稳定错误码。
+2. 会话查询 API MUST 支持分页参数 `cursor` 与 `limit`。
+3. 文件上传 API MUST 提供类型白名单、大小限制与校验失败错误码。
+4. 审计日志写入 MUST 为不可变追加模型，客户端不可直接修改。
+
+## 5.1 数据保留与合规策略
+
+1. 消息数据默认保留周期 MUST 为 365 天，超过周期的数据 SHOULD 自动转冷存储或归档。
+2. 文件元数据与二进制文件保留周期 MUST 不短于消息保留周期，删除策略 MUST 保持主从一致。
+3. 审计日志保留周期 MUST 不短于 730 天，且 MUST NOT 被普通管理员直接物理删除。
+4. 频道归档后，历史消息和文件 MUST 对原成员按权限可读；归档内容 MUST NOT 允许新增写入。
+5. 数据导出 MUST 仅允许工作区管理员执行；导出内容 MUST 支持消息、文件索引、审计摘要三类边界。
+6. 导出文件 MUST 包含操作者、时间窗、数据范围元信息，并记录到审计日志。
+
+## 6. 验收标准（可量化）
+
+### 6.1 功能验收
+
+1. 频道/DM/线程核心流程自动化用例通过率 MUST 为 100%（P0）。
+2. 消息编辑/撤回/反应/转发场景用例通过率 MUST 为 100%（P0）。
+3. `@here`、空频道 `@` 约束、提及高亮、未读聚合 MUST 全量通过。
+4. 角色旅程与页面可见性测试通过率 MUST 为 100%（管理员/频道管理员/成员三类）。
+5. 通知冲突优先级用例通过率 MUST 为 100%（静音、DND、提及、全局策略）。
+
+### 6.2 兼容性验收
+
+1. Chrome、Edge 最新两个稳定版本 MUST 全部通过核心流程。
+2. Socket.io 断线重连恢复时间 SHOULD ≤ 5 秒。
+3. MiniMax 流式消息渲染乱码率 MUST 为 0。
+4. 搜索 Top-10 命中率 MUST ≥ 90%（基于标准评测集）。
+5. 搜索精确率 MUST ≥ 85%，召回率 MUST ≥ 80%（按周回归统计）。
+
+### 6.3 安全性验收
+
+1. 未授权访问拦截成功率 MUST 为 100%。
+2. RBAC 越权测试拦截率 MUST 为 100%。
+3. 审计日志关键字段缺失率 MUST 为 0。
+
+### 6.4 部署与运维验收
+
+1. Docker Compose 全部容器健康检查通过率 MUST 为 100%。
+2. 本地卷断电重启后数据恢复成功率 MUST 为 100%。
+3. 备份恢复演练（消息 + 文件 + 配置）RPO MUST ≤ 15 分钟，RTO MUST ≤ 30 分钟。
+4. 数据保留策略执行成功率 MUST 为 100%，并可提供周期执行审计记录。
+
+## 7. 风险与限制
+
+1. SQLite 高并发写入存在锁竞争风险，需通过 WAL 与重试缓解。
+2. 本地文件存储容量需由部署方评估并配置配额阈值。
+3. 如果 MiniMax 接口协议变化，适配层 MUST 提供向后兼容策略。
+
+## 8. 变更记录
+
+| 版本 | 日期       | 变更人       | 说明                                                            |
+| ---- | ---------- | ------------ | --------------------------------------------------------------- |
+| v2.0 | 2026-03-15 | 架构与文档组 | 全量重构规格，补齐 Slack 核心能力、异常场景、量化验收、依赖约束 |
