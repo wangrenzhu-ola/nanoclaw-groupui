@@ -3,21 +3,34 @@ import { URL } from 'url';
 
 import { ASSISTANT_NAME } from './config.js';
 import {
+  addMessageReaction,
+  appendNotificationCenterEvent,
+  archiveThread,
   ChatInfo,
+  createThread,
+  createFileAsset,
   editMessage,
   getAllChats,
   getAllRegisteredGroups,
+  getFileAssetById,
+  getMessageReactionSummary,
   getChatNotificationSettings,
   getChatUnreadState,
   getMessageById,
   getMessagesSince,
+  listNotificationCenterEvents,
+  listThreads,
   getPresenceStates,
   getUnreadAggregate,
   getUserNotificationSettings,
+  listFileAssets,
+  markNotificationCenterDelivered,
   markChatAsRead,
   recallMessage,
+  searchMessages,
   setChatNotificationSettings,
   setPresenceState,
+  storeChatMetadata,
   setUserNotificationSettings,
 } from './db.js';
 import { logger } from './logger.js';
@@ -56,7 +69,9 @@ function toSessionNavItem(
     isRegistered: Boolean(group),
     groupFolder: group?.folder || null,
     requiresTrigger:
-      group?.requiresTrigger === undefined ? null : Boolean(group.requiresTrigger),
+      group?.requiresTrigger === undefined
+        ? null
+        : Boolean(group.requiresTrigger),
     isMain: group?.isMain === undefined ? null : Boolean(group.isMain),
   };
 }
@@ -67,7 +82,9 @@ function writeJson(
   payload: unknown,
 ): void {
   const body = JSON.stringify(payload);
-  res.writeHead(statusCode, { 'content-type': 'application/json; charset=utf-8' });
+  res.writeHead(statusCode, {
+    'content-type': 'application/json; charset=utf-8',
+  });
   res.end(body);
 }
 
@@ -106,10 +123,7 @@ function readJsonBody(req: http.IncomingMessage): Promise<unknown> {
   });
 }
 
-function parseWindowMinutes(
-  envName: string,
-  fallbackMinutes: number,
-): number {
+function parseWindowMinutes(envName: string, fallbackMinutes: number): number {
   const raw = process.env[envName];
   if (!raw) return fallbackMinutes;
   const parsed = Number.parseInt(raw, 10);
@@ -133,9 +147,7 @@ function toMentionAgents(input: unknown): MentionAgent[] {
   return input
     .map((item) => {
       const id =
-        typeof item === 'object' && item && 'id' in item
-          ? String(item.id)
-          : '';
+        typeof item === 'object' && item && 'id' in item ? String(item.id) : '';
       const displayName =
         typeof item === 'object' && item && 'displayName' in item
           ? String(item.displayName)
@@ -165,14 +177,57 @@ function parseBooleanLike(input: unknown, fallback: boolean): boolean {
 }
 
 function parseMentionType(input: unknown): MentionType {
-  const value = String(input || '').trim().toLowerCase();
+  const value = String(input || '')
+    .trim()
+    .toLowerCase();
   if (value === 'agent' || value === 'here' || value === 'everyone') {
     return value;
   }
   return 'none';
 }
 
-function isWithinDnd(nowIso: string, dndStart: string, dndEnd: string): boolean {
+function parseSearchDate(input: string | null): string | undefined {
+  if (!input) return undefined;
+  const value = input.trim();
+  if (!value) return undefined;
+  return Number.isFinite(Date.parse(value)) ? value : undefined;
+}
+
+function parsePositiveNumber(input: unknown, fallback: number): number {
+  const raw = Number(input);
+  if (!Number.isFinite(raw)) return fallback;
+  return Math.max(0, Math.floor(raw));
+}
+
+function supportsInlinePreview(mimeType: string): boolean {
+  const value = mimeType.trim().toLowerCase();
+  return (
+    value.startsWith('image/') ||
+    value === 'application/pdf' ||
+    value.startsWith('text/')
+  );
+}
+
+function createFileAssetId(): string {
+  return `file_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function createThreadId(): string {
+  return `th_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function parseNumberList(input: unknown): number[] {
+  if (!Array.isArray(input)) return [];
+  return input
+    .map((value) => Number(value))
+    .filter((value) => Number.isInteger(value) && value > 0);
+}
+
+function isWithinDnd(
+  nowIso: string,
+  dndStart: string,
+  dndEnd: string,
+): boolean {
   const now = new Date(nowIso);
   if (Number.isNaN(now.getTime())) return false;
   const startMatch = dndStart.match(/^(\d{1,2}):(\d{2})$/);
@@ -284,6 +339,12 @@ export function startWebuiApiServer(
     <div class="card">
       <div id="selected" class="meta">未选择会话</div>
       <div id="messages"></div>
+      <hr />
+      <div class="meta">线程验收</div>
+      <label>threadTitle<input id="threadTitle" value="r1-thread" /></label>
+      <button id="threadCreateBtn">创建线程</button>
+      <button id="threadListBtn">查询线程</button>
+      <pre id="threadResult"></pre>
     </div>
   </div>
   <script>
@@ -291,6 +352,8 @@ export function startWebuiApiServer(
     const countEl = document.getElementById('sessionCount');
     const selectedEl = document.getElementById('selected');
     const messagesEl = document.getElementById('messages');
+    const threadResultEl = document.getElementById('threadResult');
+    let selectedJid = '';
 
     function esc(v) {
       return String(v).replace(/[&<>"]/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
@@ -317,6 +380,7 @@ export function startWebuiApiServer(
     }
 
     async function loadMessages(jid) {
+      selectedJid = jid;
       selectedEl.textContent = '当前会话：' + jid;
       const path = '/api/nav/sessions/' + encodeURIComponent(jid) + '/messages?limit=20';
       const res = await fetch(path);
@@ -326,6 +390,41 @@ export function startWebuiApiServer(
         ? '<div class="meta">暂无消息</div>'
         : list.map((m) => '<pre>[' + esc(m.timestamp) + '] ' + esc(m.sender_name || m.sender || '') + '\\n' + esc(m.content || '') + '</pre>').join('');
     }
+
+    async function callJson(path, method, body) {
+      const res = await fetch(path, {
+        method,
+        headers: { 'content-type': 'application/json' },
+        body: body === undefined ? undefined : JSON.stringify(body),
+      });
+      const data = await res.json().catch(() => ({}));
+      return { status: res.status, data };
+    }
+
+    document.getElementById('threadCreateBtn').addEventListener('click', async () => {
+      if (!selectedJid) {
+        threadResultEl.textContent = '请先选择会话';
+        return;
+      }
+      threadResultEl.textContent = '请求中...';
+      const title = document.getElementById('threadTitle').value;
+      const result = await callJson('/api/nav/threads', 'POST', {
+        chatJid: selectedJid,
+        title,
+        createdBy: 'alice',
+      });
+      threadResultEl.textContent = JSON.stringify(result, null, 2);
+    });
+
+    document.getElementById('threadListBtn').addEventListener('click', async () => {
+      if (!selectedJid) {
+        threadResultEl.textContent = '请先选择会话';
+        return;
+      }
+      threadResultEl.textContent = '请求中...';
+      const result = await callJson('/api/nav/threads?chatJid=' + encodeURIComponent(selectedJid), 'GET');
+      threadResultEl.textContent = JSON.stringify(result, null, 2);
+    });
 
     loadSessions().catch((err) => {
       countEl.textContent = '加载失败：' + err.message;
@@ -386,6 +485,16 @@ export function startWebuiApiServer(
       <pre id="mentionResult"></pre>
     </div>
     <div class="card">
+      <h3>并发去重验收</h3>
+      <label>chatJid<input id="reactionChatJid" value="g1@g.us" /></label>
+      <label>messageId<input id="reactionMessageId" value="m1" /></label>
+      <label>emoji<input id="reactionEmoji" value="👍" /></label>
+      <label>actor<input id="reactionActor" value="alice" /></label>
+      <button id="reactionAddBtn">添加反应</button>
+      <button id="reactionListBtn">查询汇总</button>
+      <pre id="reactionResult"></pre>
+    </div>
+    <div class="card">
       <h3>门禁说明</h3>
       <ul>
         <li>消息编辑/撤回默认时限 15 分钟</li>
@@ -434,7 +543,9 @@ function bindR2Acceptance() {
   const editBtn = safeGet('editBtn');
   const recallBtn = safeGet('recallBtn');
   const mentionBtn = safeGet('mentionBtn');
-  if (!editBtn || !recallBtn || !mentionBtn) {
+  const reactionAddBtn = safeGet('reactionAddBtn');
+  const reactionListBtn = safeGet('reactionListBtn');
+  if (!editBtn || !recallBtn || !mentionBtn || !reactionAddBtn || !reactionListBtn) {
     return;
   }
 
@@ -483,6 +594,34 @@ function bindR2Acceptance() {
       showResult('mentionResult', result);
     } catch (err) {
       showResult('mentionResult', { error: String(err) });
+    }
+  });
+
+  reactionAddBtn.addEventListener('click', async () => {
+    try {
+      showResult('reactionResult', '请求中...');
+      const chatJid = safeGet('reactionChatJid').value;
+      const messageId = safeGet('reactionMessageId').value;
+      const emoji = safeGet('reactionEmoji').value;
+      const actor = safeGet('reactionActor').value;
+      const path = '/api/messages/' + encodeURIComponent(chatJid) + '/' + encodeURIComponent(messageId) + '/reactions';
+      const result = await callJson(path, 'POST', { actor, emoji });
+      showResult('reactionResult', result);
+    } catch (err) {
+      showResult('reactionResult', { error: String(err) });
+    }
+  });
+
+  reactionListBtn.addEventListener('click', async () => {
+    try {
+      showResult('reactionResult', '请求中...');
+      const chatJid = safeGet('reactionChatJid').value;
+      const messageId = safeGet('reactionMessageId').value;
+      const path = '/api/messages/' + encodeURIComponent(chatJid) + '/' + encodeURIComponent(messageId) + '/reactions';
+      const result = await callJson(path, 'GET');
+      showResult('reactionResult', result);
+    } catch (err) {
+      showResult('reactionResult', { error: String(err) });
     }
   });
 }
@@ -576,6 +715,8 @@ if (document.readyState === 'loading') {
         </select>
       </label>
       <button id="notifyEvalBtn">评估通知结果</button>
+      <button id="notifyCenterBtn">查询通知中心</button>
+      <button id="notifyReplayBtn">回放首条待处理</button>
       <pre id="notifyEvalResult"></pre>
     </div>
   </div>
@@ -626,7 +767,9 @@ function bindR3Acceptance() {
   const notifySaveUserBtn = safeGet('notifySaveUserBtn');
   const notifyMuteBtn = safeGet('notifyMuteBtn');
   const notifyEvalBtn = safeGet('notifyEvalBtn');
-  if (!unreadFetchBtn || !unreadReadBtn || !presenceSetBtn || !presenceListBtn || !notifySaveUserBtn || !notifyMuteBtn || !notifyEvalBtn) {
+  const notifyCenterBtn = safeGet('notifyCenterBtn');
+  const notifyReplayBtn = safeGet('notifyReplayBtn');
+  if (!unreadFetchBtn || !unreadReadBtn || !presenceSetBtn || !presenceListBtn || !notifySaveUserBtn || !notifyMuteBtn || !notifyEvalBtn || !notifyCenterBtn || !notifyReplayBtn) {
     return;
   }
 
@@ -731,6 +874,37 @@ function bindR3Acceptance() {
       showResult('notifyEvalResult', { error: String(err) });
     }
   });
+
+  notifyCenterBtn.addEventListener('click', async () => {
+    try {
+      const actor = safeValue('notifyActor');
+      showResult('notifyEvalResult', '请求中...');
+      const result = await callJson('/api/notifications/center?actor=' + encodeURIComponent(actor) + '&onlyPending=true&limit=20', 'GET');
+      showResult('notifyEvalResult', result);
+    } catch (err) {
+      showResult('notifyEvalResult', { error: String(err) });
+    }
+  });
+
+  notifyReplayBtn.addEventListener('click', async () => {
+    try {
+      const actor = safeValue('notifyActor');
+      showResult('notifyEvalResult', '请求中...');
+      const listed = await callJson('/api/notifications/center?actor=' + encodeURIComponent(actor) + '&onlyPending=true&limit=1', 'GET');
+      const first = listed && listed.data && listed.data.events && listed.data.events[0] ? listed.data.events[0] : null;
+      if (!first) {
+        showResult('notifyEvalResult', { status: 200, data: { replayed: 0, message: '无待回放事件' } });
+        return;
+      }
+      const replay = await callJson('/api/notifications/center/replay', 'POST', {
+        actor,
+        ids: [first.id],
+      });
+      showResult('notifyEvalResult', replay);
+    } catch (err) {
+      showResult('notifyEvalResult', { error: String(err) });
+    }
+  });
 }
 
 if (document.readyState === 'loading') {
@@ -742,16 +916,329 @@ if (document.readyState === 'loading') {
       return;
     }
 
+    if (method === 'GET' && url.pathname === '/r4-acceptance') {
+      writeHtml(
+        res,
+        200,
+        `<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>NanoClaw R4 验收页</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; margin: 24px; }
+    h1 { margin-bottom: 8px; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    .card { border: 1px solid #ddd; border-radius: 8px; padding: 12px; }
+    label { display:block; margin-top: 8px; font-size: 13px; color: #555; }
+    input, select, button { width: 100%; box-sizing: border-box; margin-top: 6px; }
+    button { padding: 8px; margin-top: 10px; cursor: pointer; }
+    pre { white-space: pre-wrap; background: #f8f8f8; padding: 8px; border-radius: 6px; min-height: 72px; }
+  </style>
+</head>
+<body>
+  <h1>R4 搜索与文件中心验收</h1>
+  <div class="grid">
+    <div class="card">
+      <h3>多条件消息搜索</h3>
+      <label>keyword<input id="searchKeyword" value="hello" /></label>
+      <label>sender<input id="searchSender" value="alice" /></label>
+      <label>chatJid<input id="searchChatJid" value="g1@g.us" /></label>
+      <label>from<input id="searchFrom" value="2026-03-01T00:00:00.000Z" /></label>
+      <label>to<input id="searchTo" value="2026-03-31T23:59:59.999Z" /></label>
+      <button id="searchBtn">执行搜索</button>
+      <pre id="searchResult"></pre>
+    </div>
+    <div class="card">
+      <h3>文件上传登记</h3>
+      <label>chatJid<input id="fileChatJid" value="g1@g.us" /></label>
+      <label>fileName<input id="fileName" value="manual.zip" /></label>
+      <label>mimeType<input id="fileMimeType" value="application/zip" /></label>
+      <label>size<input id="fileSize" value="2048" /></label>
+      <label>storagePath<input id="filePath" value="/files/manual.zip" /></label>
+      <button id="fileCreateBtn">创建文件记录</button>
+      <button id="fileListBtn">查询文件列表</button>
+      <pre id="fileResult"></pre>
+    </div>
+    <div class="card">
+      <h3>文件详情与降级预览</h3>
+      <label>fileId<input id="fileId" /></label>
+      <button id="fileDetailBtn">查询文件详情</button>
+      <button id="fileDownloadBtn">获取下载入口</button>
+      <pre id="fileDetailResult"></pre>
+    </div>
+    <div class="card">
+      <h3>搜索评测集</h3>
+      <button id="searchEvalBtn">执行Top10/Precision/Recall评测</button>
+      <pre id="searchEvalResult"></pre>
+    </div>
+    <div class="card">
+      <h3>门禁说明</h3>
+      <ul>
+        <li>搜索支持关键词 + 时间范围 + 发送者 + 会话过滤</li>
+        <li>搜索结果按时间倒序返回</li>
+        <li>文件不可预览类型自动降级为元数据+下载入口</li>
+        <li>接口：/api/search/messages 与 /api/files*</li>
+      </ul>
+    </div>
+  </div>
+  <script src="/r4-acceptance.js"></script>
+</body>
+</html>`,
+      );
+      return;
+    }
+
+    if (method === 'GET' && url.pathname === '/r4-acceptance.js') {
+      res.writeHead(200, {
+        'content-type': 'application/javascript; charset=utf-8',
+        'cache-control': 'no-store',
+      });
+      res.end(`
+function safeGet(id) {
+  return document.getElementById(id);
+}
+
+function safeValue(id) {
+  const el = safeGet(id);
+  return el ? el.value : '';
+}
+
+function showResult(id, value) {
+  const el = safeGet(id);
+  if (el) {
+    el.textContent = typeof value === 'string' ? value : JSON.stringify(value, null, 2);
+  }
+}
+
+async function callJson(path, method, body) {
+  const res = await fetch(path, {
+    method,
+    headers: { 'content-type': 'application/json' },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  const data = await res.json().catch(() => ({}));
+  return { status: res.status, data };
+}
+
+function bindR4Acceptance() {
+  const searchBtn = safeGet('searchBtn');
+  const fileCreateBtn = safeGet('fileCreateBtn');
+  const fileListBtn = safeGet('fileListBtn');
+  const fileDetailBtn = safeGet('fileDetailBtn');
+  const fileDownloadBtn = safeGet('fileDownloadBtn');
+  const searchEvalBtn = safeGet('searchEvalBtn');
+  if (!searchBtn || !fileCreateBtn || !fileListBtn || !fileDetailBtn || !fileDownloadBtn || !searchEvalBtn) {
+    return;
+  }
+
+  searchBtn.addEventListener('click', async () => {
+    try {
+      showResult('searchResult', '请求中...');
+      const params = new URLSearchParams();
+      const keyword = safeValue('searchKeyword');
+      const sender = safeValue('searchSender');
+      const chatJid = safeValue('searchChatJid');
+      const from = safeValue('searchFrom');
+      const to = safeValue('searchTo');
+      if (keyword) params.set('keyword', keyword);
+      if (sender) params.set('sender', sender);
+      if (chatJid) params.set('chatJid', chatJid);
+      if (from) params.set('from', from);
+      if (to) params.set('to', to);
+      params.set('limit', '20');
+      const result = await callJson('/api/search/messages?' + params.toString(), 'GET');
+      showResult('searchResult', result);
+    } catch (err) {
+      showResult('searchResult', { error: String(err) });
+    }
+  });
+
+  fileCreateBtn.addEventListener('click', async () => {
+    try {
+      showResult('fileResult', '请求中...');
+      const payload = {
+        chatJid: safeValue('fileChatJid'),
+        fileName: safeValue('fileName'),
+        mimeType: safeValue('fileMimeType'),
+        size: Number(safeValue('fileSize')),
+        storagePath: safeValue('filePath'),
+      };
+      const result = await callJson('/api/files', 'POST', payload);
+      if (result && result.data && result.data.asset && result.data.asset.id) {
+        const fileIdInput = safeGet('fileId');
+        if (fileIdInput) {
+          fileIdInput.value = result.data.asset.id;
+        }
+      }
+      showResult('fileResult', result);
+    } catch (err) {
+      showResult('fileResult', { error: String(err) });
+    }
+  });
+
+  fileListBtn.addEventListener('click', async () => {
+    try {
+      showResult('fileResult', '请求中...');
+      const chatJid = safeValue('fileChatJid');
+      const result = await callJson('/api/files?chatJid=' + encodeURIComponent(chatJid) + '&limit=20', 'GET');
+      showResult('fileResult', result);
+    } catch (err) {
+      showResult('fileResult', { error: String(err) });
+    }
+  });
+
+  fileDetailBtn.addEventListener('click', async () => {
+    try {
+      showResult('fileDetailResult', '请求中...');
+      const fileId = safeValue('fileId');
+      const result = await callJson('/api/files/' + encodeURIComponent(fileId), 'GET');
+      showResult('fileDetailResult', result);
+    } catch (err) {
+      showResult('fileDetailResult', { error: String(err) });
+    }
+  });
+
+  fileDownloadBtn.addEventListener('click', async () => {
+    try {
+      showResult('fileDetailResult', '请求中...');
+      const fileId = safeValue('fileId');
+      const result = await callJson('/api/files/' + encodeURIComponent(fileId) + '/download', 'GET');
+      showResult('fileDetailResult', result);
+    } catch (err) {
+      showResult('fileDetailResult', { error: String(err) });
+    }
+  });
+
+  searchEvalBtn.addEventListener('click', async () => {
+    try {
+      showResult('searchEvalResult', '请求中...');
+      const result = await callJson('/api/search/evaluate', 'POST', {
+        cases: [
+          { query: 'hello', expectedIds: ['m1'], filters: { chatJid: 'g1@g.us' } },
+          { query: 'world', expectedIds: ['m2'], filters: { chatJid: 'g1@g.us' } }
+        ]
+      });
+      showResult('searchEvalResult', result);
+    } catch (err) {
+      showResult('searchEvalResult', { error: String(err) });
+    }
+  });
+}
+
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', bindR4Acceptance);
+} else {
+  bindR4Acceptance();
+}
+`);
+      return;
+    }
+
     if (method === 'GET' && url.pathname === '/api/nav/sessions') {
-      const chats = getAllChats().filter((chat) => chat.jid !== '__group_sync__');
+      const chats = getAllChats().filter(
+        (chat) => chat.jid !== '__group_sync__',
+      );
       const registered = getAllRegisteredGroups();
       const sessions = chats.map((chat) => toSessionNavItem(chat, registered));
       writeJson(res, 200, { sessions });
       return;
     }
 
+    if (method === 'POST' && url.pathname === '/api/nav/dm') {
+      readJsonBody(req)
+        .then((body) => {
+          const payload =
+            body && typeof body === 'object'
+              ? (body as Record<string, unknown>)
+              : {};
+          const jid = String(payload.jid || '').trim();
+          const name = String(payload.name || jid).trim();
+          const timestamp = payload.timestamp
+            ? String(payload.timestamp)
+            : new Date().toISOString();
+          if (!jid) {
+            writeJson(res, 400, { code: 'INVALID_JID' });
+            return;
+          }
+          storeChatMetadata(jid, timestamp, name, 'whatsapp', false);
+          writeJson(res, 201, { jid, name, created: true });
+        })
+        .catch((err) => {
+          logger.warn({ err }, 'Invalid dm payload');
+          writeJson(res, 400, { code: 'INVALID_REQUEST' });
+        });
+      return;
+    }
+
+    if (method === 'GET' && url.pathname === '/api/nav/threads') {
+      const chatJid = String(url.searchParams.get('chatJid') || '').trim();
+      if (!chatJid) {
+        writeJson(res, 400, { code: 'INVALID_CHAT_JID' });
+        return;
+      }
+      const includeArchived = parseBooleanLike(
+        url.searchParams.get('includeArchived'),
+        false,
+      );
+      writeJson(res, 200, {
+        chatJid,
+        threads: listThreads(chatJid, includeArchived),
+      });
+      return;
+    }
+
+    if (method === 'POST' && url.pathname === '/api/nav/threads') {
+      readJsonBody(req)
+        .then((body) => {
+          const payload =
+            body && typeof body === 'object'
+              ? (body as Record<string, unknown>)
+              : {};
+          const chatJid = String(payload.chatJid || '').trim();
+          const title = String(payload.title || '').trim();
+          const createdBy = parseActor(String(payload.createdBy || ''));
+          if (!chatJid || !title) {
+            writeJson(res, 400, { code: 'INVALID_THREAD_PAYLOAD' });
+            return;
+          }
+          const thread = createThread({
+            id: payload.id ? String(payload.id) : createThreadId(),
+            chatJid,
+            title,
+            createdBy,
+            createdAt: payload.createdAt
+              ? String(payload.createdAt)
+              : new Date().toISOString(),
+          });
+          writeJson(res, 201, { thread });
+        })
+        .catch((err) => {
+          logger.warn({ err }, 'Invalid thread create payload');
+          writeJson(res, 400, { code: 'INVALID_REQUEST' });
+        });
+      return;
+    }
+
+    if (method === 'POST' && url.pathname.startsWith('/api/nav/threads/')) {
+      const match = url.pathname.match(/^\/api\/nav\/threads\/([^/]+)\/archive$/);
+      if (match) {
+        const threadId = decodeURIComponent(match[1]);
+        const archived = archiveThread(threadId, new Date().toISOString());
+        if (!archived) {
+          writeJson(res, 404, { code: 'THREAD_NOT_FOUND' });
+          return;
+        }
+        writeJson(res, 200, { thread: archived });
+        return;
+      }
+    }
+
     if (method === 'GET' && url.pathname.startsWith('/api/nav/sessions/')) {
-      const match = url.pathname.match(/^\/api\/nav\/sessions\/([^/]+)\/messages$/);
+      const match = url.pathname.match(
+        /^\/api\/nav\/sessions\/([^/]+)\/messages$/,
+      );
       if (!match) {
         writeJson(res, 404, { error: 'Not Found' });
         return;
@@ -763,6 +1250,198 @@ if (document.readyState === 'loading') {
       const messages = getMessagesSince(chatJid, since, ASSISTANT_NAME, limit);
       writeJson(res, 200, { chatJid, since, limit, messages });
       return;
+    }
+
+    if (method === 'GET' && url.pathname === '/api/search/messages') {
+      const keyword = (url.searchParams.get('keyword') || '').trim();
+      const sender = (url.searchParams.get('sender') || '').trim();
+      const chatJid = (url.searchParams.get('chatJid') || '').trim();
+      const from = parseSearchDate(url.searchParams.get('from'));
+      const to = parseSearchDate(url.searchParams.get('to'));
+      const limit = parseLimit(url.searchParams.get('limit'));
+      const filters = {
+        keyword: keyword || undefined,
+        sender: sender || undefined,
+        chatJid: chatJid || undefined,
+        from,
+        to,
+      };
+      const results = searchMessages(filters, ASSISTANT_NAME, limit);
+      writeJson(res, 200, { filters, limit, total: results.length, results });
+      return;
+    }
+
+    if (method === 'POST' && url.pathname === '/api/search/evaluate') {
+      readJsonBody(req)
+        .then((body) => {
+          const payload =
+            body && typeof body === 'object'
+              ? (body as Record<string, unknown>)
+              : {};
+          const cases = Array.isArray(payload.cases)
+            ? payload.cases
+            : [];
+          if (cases.length === 0) {
+            writeJson(res, 400, { code: 'INVALID_EVALUATION_CASES' });
+            return;
+          }
+          let hitTop10Count = 0;
+          let precisionSum = 0;
+          let recallSum = 0;
+          for (const item of cases) {
+            const query =
+              item && typeof item === 'object' && 'query' in item
+                ? String(item.query)
+                : '';
+            const expectedIds =
+              item && typeof item === 'object' && 'expectedIds' in item
+                ? Array.isArray(item.expectedIds)
+                  ? item.expectedIds.map((id: unknown) => String(id))
+                  : []
+                : [];
+            const filters =
+              item && typeof item === 'object' && 'filters' in item
+                ? (item.filters as Record<string, unknown>)
+                : {};
+            const results = searchMessages(
+              {
+                keyword: query || undefined,
+                sender: filters.sender ? String(filters.sender) : undefined,
+                chatJid: filters.chatJid ? String(filters.chatJid) : undefined,
+                from: filters.from ? String(filters.from) : undefined,
+                to: filters.to ? String(filters.to) : undefined,
+              },
+              ASSISTANT_NAME,
+              10,
+            );
+            const resultIds = results.map((row) => row.id);
+            const matched = resultIds.filter((id) => expectedIds.includes(id));
+            if (matched.length > 0) {
+              hitTop10Count += 1;
+            }
+            precisionSum += resultIds.length
+              ? matched.length / resultIds.length
+              : 0;
+            recallSum += expectedIds.length
+              ? matched.length / expectedIds.length
+              : 1;
+          }
+          const totalCases = cases.length;
+          writeJson(res, 200, {
+            totalCases,
+            top10HitRate: Number((hitTop10Count / totalCases).toFixed(4)),
+            precision: Number((precisionSum / totalCases).toFixed(4)),
+            recall: Number((recallSum / totalCases).toFixed(4)),
+          });
+        })
+        .catch((err) => {
+          logger.warn({ err }, 'Invalid search evaluation payload');
+          writeJson(res, 400, { code: 'INVALID_REQUEST' });
+        });
+      return;
+    }
+
+    if (method === 'POST' && url.pathname === '/api/files') {
+      readJsonBody(req)
+        .then((body) => {
+          const payload =
+            body && typeof body === 'object'
+              ? (body as Record<string, unknown>)
+              : {};
+          const chatJid = String(payload.chatJid || '').trim();
+          const fileName = String(payload.fileName || '').trim();
+          const mimeType = String(payload.mimeType || '').trim();
+          const storagePath = String(payload.storagePath || '').trim();
+          const messageId = payload.messageId
+            ? String(payload.messageId).trim()
+            : null;
+          const size = parsePositiveNumber(payload.size, 0);
+          const createdAtRaw = String(payload.createdAt || '').trim();
+          const createdAt =
+            createdAtRaw && Number.isFinite(Date.parse(createdAtRaw))
+              ? createdAtRaw
+              : new Date().toISOString();
+          if (!chatJid || !fileName || !mimeType || !storagePath) {
+            writeJson(res, 400, { code: 'INVALID_FILE_PAYLOAD' });
+            return;
+          }
+          const id = payload.id ? String(payload.id) : createFileAssetId();
+          const previewable = supportsInlinePreview(mimeType);
+          const asset = createFileAsset({
+            id,
+            chatJid,
+            messageId,
+            fileName,
+            mimeType,
+            size,
+            storagePath,
+            previewable,
+            createdAt,
+          });
+          writeJson(res, 201, { asset });
+        })
+        .catch((err) => {
+          logger.warn({ err }, 'Invalid file create payload');
+          writeJson(res, 400, { code: 'INVALID_REQUEST' });
+        });
+      return;
+    }
+
+    if (method === 'GET' && url.pathname === '/api/files') {
+      const chatJid = (url.searchParams.get('chatJid') || '').trim();
+      const keyword = (url.searchParams.get('keyword') || '').trim();
+      const mimeType = (url.searchParams.get('mimeType') || '').trim();
+      const limit = parseLimit(url.searchParams.get('limit'));
+      const assets = listFileAssets({
+        chatJid: chatJid || undefined,
+        keyword: keyword || undefined,
+        mimeType: mimeType || undefined,
+        limit,
+      });
+      writeJson(res, 200, { limit, total: assets.length, assets });
+      return;
+    }
+
+    if (method === 'GET' && url.pathname.startsWith('/api/files/')) {
+      const downloadMatch = url.pathname.match(/^\/api\/files\/([^/]+)\/download$/);
+      if (downloadMatch) {
+        const fileId = decodeURIComponent(downloadMatch[1]);
+        const asset = getFileAssetById(fileId);
+        if (!asset) {
+          writeJson(res, 404, { code: 'FILE_NOT_FOUND' });
+          return;
+        }
+        writeJson(res, 200, {
+          fileId: asset.id,
+          fileName: asset.fileName,
+          mimeType: asset.mimeType,
+          size: asset.size,
+          storagePath: asset.storagePath,
+          publicUrl: process.env.STORAGE_PUBLIC_BASE_URL
+            ? `${process.env.STORAGE_PUBLIC_BASE_URL.replace(/\/$/, '')}/${asset.id}`
+            : null,
+          downloadUrl: `/api/files/${encodeURIComponent(asset.id)}/download`,
+        });
+        return;
+      }
+      const detailMatch = url.pathname.match(/^\/api\/files\/([^/]+)$/);
+      if (detailMatch) {
+        const fileId = decodeURIComponent(detailMatch[1]);
+        const asset = getFileAssetById(fileId);
+        if (!asset) {
+          writeJson(res, 404, { code: 'FILE_NOT_FOUND' });
+          return;
+        }
+        writeJson(res, 200, {
+          asset,
+          preview: {
+            mode: asset.previewable ? 'inline' : 'metadata',
+            available: asset.previewable,
+          },
+          downloadUrl: `/api/files/${encodeURIComponent(asset.id)}/download`,
+        });
+        return;
+      }
     }
 
     if (method === 'GET' && url.pathname === '/api/unread/aggregate') {
@@ -843,7 +1522,10 @@ if (document.readyState === 'loading') {
               statusValue === 'offline'
                 ? statusValue
                 : 'offline';
-            const online = parseBooleanLike(payload.online, status !== 'offline');
+            const online = parseBooleanLike(
+              payload.online,
+              status !== 'offline',
+            );
             const state = setPresenceState(actor, online, status);
             writeJson(res, 200, { state });
           })
@@ -897,7 +1579,9 @@ if (document.readyState === 'loading') {
               .trim()
               .toLowerCase();
             const globalLevel =
-              globalRaw === 'all' || globalRaw === 'mentions' || globalRaw === 'none'
+              globalRaw === 'all' ||
+              globalRaw === 'mentions' ||
+              globalRaw === 'none'
                 ? globalRaw
                 : 'all';
             const dndEnabled = parseBooleanLike(payload.dndEnabled, false);
@@ -984,7 +1668,9 @@ if (document.readyState === 'loading') {
             payload.workspaceAllowEveryone,
             false,
           );
-          const nowIso = payload.now ? String(payload.now) : new Date().toISOString();
+          const nowIso = payload.now
+            ? String(payload.now)
+            : new Date().toISOString();
 
           const userSettings = getUserNotificationSettings(actor);
           const chatSettings = getChatNotificationSettings(actor, chatJid);
@@ -999,11 +1685,22 @@ if (document.readyState === 'loading') {
             workspaceAllowEveryone,
             nowIso,
           });
+          let deferredEventId: number | null = null;
+          if (decision.deferred) {
+            deferredEventId = appendNotificationCenterEvent({
+              actor,
+              chatJid,
+              mentionType,
+              reason: decision.reason,
+              eventTime: nowIso,
+            });
+          }
           writeJson(res, 200, {
             actor,
             chatJid,
             mentionType,
             decision,
+            deferredEventId,
             userSettings,
             chatSettings,
           });
@@ -1015,8 +1712,45 @@ if (document.readyState === 'loading') {
       return;
     }
 
+    if (method === 'GET' && url.pathname === '/api/notifications/center') {
+      const actor = parseActor(url.searchParams.get('actor'));
+      const onlyPending = parseBooleanLike(
+        url.searchParams.get('onlyPending'),
+        true,
+      );
+      const limit = parseLimit(url.searchParams.get('limit'));
+      const events = listNotificationCenterEvents(actor, onlyPending, limit);
+      writeJson(res, 200, { actor, onlyPending, limit, total: events.length, events });
+      return;
+    }
+
+    if (method === 'POST' && url.pathname === '/api/notifications/center/replay') {
+      readJsonBody(req)
+        .then((body) => {
+          const payload =
+            body && typeof body === 'object'
+              ? (body as Record<string, unknown>)
+              : {};
+          const actor = parseActor(String(payload.actor || ''));
+          const ids = parseNumberList(payload.ids);
+          const changed = markNotificationCenterDelivered(
+            actor,
+            ids,
+            new Date().toISOString(),
+          );
+          writeJson(res, 200, { actor, replayed: changed, ids });
+        })
+        .catch((err) => {
+          logger.warn({ err }, 'Invalid notification replay payload');
+          writeJson(res, 400, { code: 'INVALID_REQUEST' });
+        });
+      return;
+    }
+
     if (method === 'PATCH' && url.pathname.startsWith('/api/messages/')) {
-      const match = url.pathname.match(/^\/api\/messages\/([^/]+)\/([^/]+)\/edit$/);
+      const match = url.pathname.match(
+        /^\/api\/messages\/([^/]+)\/([^/]+)\/edit$/,
+      );
       if (!match) {
         writeJson(res, 404, { error: 'Not Found' });
         return;
@@ -1080,6 +1814,45 @@ if (document.readyState === 'loading') {
     }
 
     if (method === 'POST' && url.pathname.startsWith('/api/messages/')) {
+      const reactionMatch = url.pathname.match(
+        /^\/api\/messages\/([^/]+)\/([^/]+)\/reactions$/,
+      );
+      if (reactionMatch) {
+        const chatJid = decodeURIComponent(reactionMatch[1]);
+        const messageId = decodeURIComponent(reactionMatch[2]);
+        readJsonBody(req)
+          .then((body) => {
+            const payload =
+              body && typeof body === 'object'
+                ? (body as Record<string, unknown>)
+                : {};
+            const emoji = String(payload.emoji || '').trim();
+            const actor = parseActor(String(payload.actor || ''));
+            if (!emoji) {
+              writeJson(res, 400, { code: 'INVALID_EMOJI' });
+              return;
+            }
+            const current = getMessageById(chatJid, messageId);
+            if (!current) {
+              writeJson(res, 404, { code: 'MESSAGE_NOT_FOUND' });
+              return;
+            }
+            const result = addMessageReaction({
+              chatJid,
+              messageId,
+              emoji,
+              actor,
+              createdAt: new Date().toISOString(),
+            });
+            writeJson(res, 200, { chatJid, messageId, emoji, ...result });
+          })
+          .catch((err) => {
+            logger.warn({ err }, 'Invalid reaction payload');
+            writeJson(res, 400, { code: 'INVALID_REQUEST' });
+          });
+        return;
+      }
+
       const match = url.pathname.match(
         /^\/api\/messages\/([^/]+)\/([^/]+)\/recall$/,
       );
@@ -1138,6 +1911,22 @@ if (document.readyState === 'loading') {
           writeJson(res, 400, { code: 'INVALID_REQUEST' });
         });
       return;
+    }
+
+    if (method === 'GET' && url.pathname.startsWith('/api/messages/')) {
+      const reactionMatch = url.pathname.match(
+        /^\/api\/messages\/([^/]+)\/([^/]+)\/reactions$/,
+      );
+      if (reactionMatch) {
+        const chatJid = decodeURIComponent(reactionMatch[1]);
+        const messageId = decodeURIComponent(reactionMatch[2]);
+        writeJson(res, 200, {
+          chatJid,
+          messageId,
+          reactions: getMessageReactionSummary(chatJid, messageId),
+        });
+        return;
+      }
     }
 
     if (method === 'POST' && url.pathname === '/api/mentions/resolve') {
@@ -1206,7 +1995,11 @@ if (document.readyState === 'loading') {
             }
           }
 
-          if (agents.length === 0 && text.includes('@') && warnings.length === 0) {
+          if (
+            agents.length === 0 &&
+            text.includes('@') &&
+            warnings.length === 0
+          ) {
             warnings.push('请先邀请 Agent');
           }
 

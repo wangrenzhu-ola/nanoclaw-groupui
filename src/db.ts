@@ -40,6 +40,25 @@ function createSchema(database: Database.Database): void {
       FOREIGN KEY (chat_jid) REFERENCES chats(jid)
     );
     CREATE INDEX IF NOT EXISTS idx_timestamp ON messages(timestamp);
+    CREATE TABLE IF NOT EXISTS threads (
+      id TEXT PRIMARY KEY,
+      chat_jid TEXT NOT NULL,
+      title TEXT NOT NULL,
+      created_by TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      archived INTEGER NOT NULL DEFAULT 0,
+      archived_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_threads_chat_created ON threads(chat_jid, created_at DESC);
+    CREATE TABLE IF NOT EXISTS message_reactions (
+      chat_jid TEXT NOT NULL,
+      message_id TEXT NOT NULL,
+      emoji TEXT NOT NULL,
+      actor TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      PRIMARY KEY (chat_jid, message_id, emoji, actor)
+    );
+    CREATE INDEX IF NOT EXISTS idx_reactions_message ON message_reactions(chat_jid, message_id, emoji);
 
     CREATE TABLE IF NOT EXISTS scheduled_tasks (
       id TEXT PRIMARY KEY,
@@ -107,6 +126,30 @@ function createSchema(database: Database.Database): void {
       updated_at TEXT NOT NULL,
       PRIMARY KEY (actor, chat_jid)
     );
+    CREATE TABLE IF NOT EXISTS notification_center_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      actor TEXT NOT NULL,
+      chat_jid TEXT NOT NULL,
+      mention_type TEXT NOT NULL,
+      reason TEXT NOT NULL,
+      event_time TEXT NOT NULL,
+      replayed INTEGER NOT NULL DEFAULT 0,
+      replayed_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_notify_center_actor_time ON notification_center_events(actor, event_time DESC);
+    CREATE TABLE IF NOT EXISTS file_assets (
+      id TEXT PRIMARY KEY,
+      chat_jid TEXT NOT NULL,
+      message_id TEXT,
+      file_name TEXT NOT NULL,
+      mime_type TEXT NOT NULL,
+      size INTEGER NOT NULL,
+      storage_path TEXT NOT NULL,
+      previewable INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_file_assets_chat_created ON file_assets(chat_jid, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_file_assets_name ON file_assets(file_name);
     CREATE TABLE IF NOT EXISTS registered_groups (
       jid TEXT PRIMARY KEY,
       name TEXT NOT NULL,
@@ -401,6 +444,104 @@ export function getMessageById(
     .get(chatJid, messageId) as StoredMessageRecord | undefined;
 }
 
+export function createThread(input: {
+  id: string;
+  chatJid: string;
+  title: string;
+  createdBy: string;
+  createdAt: string;
+}): ThreadRecord {
+  db.prepare(
+    `
+      INSERT OR REPLACE INTO threads (id, chat_jid, title, created_by, created_at, archived, archived_at)
+      VALUES (?, ?, ?, ?, ?, 0, NULL)
+    `,
+  ).run(input.id, input.chatJid, input.title, input.createdBy, input.createdAt);
+  return {
+    id: input.id,
+    chatJid: input.chatJid,
+    title: input.title,
+    createdBy: input.createdBy,
+    createdAt: input.createdAt,
+    archived: false,
+    archivedAt: null,
+  };
+}
+
+export function listThreads(chatJid: string, includeArchived: boolean): ThreadRecord[] {
+  const rows = db
+    .prepare(
+      `
+      SELECT id, chat_jid, title, created_by, created_at, archived, archived_at
+      FROM threads
+      WHERE chat_jid = ? AND (? = 1 OR archived = 0)
+      ORDER BY created_at DESC
+    `,
+    )
+    .all(chatJid, includeArchived ? 1 : 0) as Array<{
+    id: string;
+    chat_jid: string;
+    title: string;
+    created_by: string;
+    created_at: string;
+    archived: number;
+    archived_at: string | null;
+  }>;
+  return rows.map((row) => ({
+    id: row.id,
+    chatJid: row.chat_jid,
+    title: row.title,
+    createdBy: row.created_by,
+    createdAt: row.created_at,
+    archived: row.archived === 1,
+    archivedAt: row.archived_at,
+  }));
+}
+
+export function archiveThread(threadId: string, archivedAt: string): ThreadRecord | undefined {
+  const result = db
+    .prepare(
+      `
+      UPDATE threads
+      SET archived = 1, archived_at = ?
+      WHERE id = ? AND archived = 0
+    `,
+    )
+    .run(archivedAt, threadId);
+  if (result.changes === 0) {
+    return undefined;
+  }
+  const row = db
+    .prepare(
+      `
+      SELECT id, chat_jid, title, created_by, created_at, archived, archived_at
+      FROM threads
+      WHERE id = ?
+    `,
+    )
+    .get(threadId) as
+    | {
+        id: string;
+        chat_jid: string;
+        title: string;
+        created_by: string;
+        created_at: string;
+        archived: number;
+        archived_at: string | null;
+      }
+    | undefined;
+  if (!row) return undefined;
+  return {
+    id: row.id,
+    chatJid: row.chat_jid,
+    title: row.title,
+    createdBy: row.created_by,
+    createdAt: row.created_at,
+    archived: row.archived === 1,
+    archivedAt: row.archived_at,
+  };
+}
+
 export function editMessage(
   chatJid: string,
   messageId: string,
@@ -417,6 +558,71 @@ export function editMessage(
     )
     .run(content, editedAt, chatJid, messageId);
   return result.changes > 0;
+}
+
+export function addMessageReaction(input: {
+  chatJid: string;
+  messageId: string;
+  emoji: string;
+  actor: string;
+  createdAt: string;
+}): { deduplicated: boolean; count: number; actors: string[] } {
+  const result = db
+    .prepare(
+      `
+      INSERT OR IGNORE INTO message_reactions (chat_jid, message_id, emoji, actor, created_at)
+      VALUES (?, ?, ?, ?, ?)
+    `,
+    )
+    .run(
+      input.chatJid,
+      input.messageId,
+      input.emoji,
+      input.actor,
+      input.createdAt,
+    );
+  const rows = db
+    .prepare(
+      `
+      SELECT actor
+      FROM message_reactions
+      WHERE chat_jid = ? AND message_id = ? AND emoji = ?
+      ORDER BY created_at ASC
+    `,
+    )
+    .all(input.chatJid, input.messageId, input.emoji) as Array<{ actor: string }>;
+  return {
+    deduplicated: result.changes === 0,
+    count: rows.length,
+    actors: rows.map((row) => row.actor),
+  };
+}
+
+export function getMessageReactionSummary(
+  chatJid: string,
+  messageId: string,
+): Array<{ emoji: string; count: number; actors: string[] }> {
+  const rows = db
+    .prepare(
+      `
+      SELECT emoji, actor
+      FROM message_reactions
+      WHERE chat_jid = ? AND message_id = ?
+      ORDER BY emoji ASC, created_at ASC
+    `,
+    )
+    .all(chatJid, messageId) as Array<{ emoji: string; actor: string }>;
+  const grouped = new Map<string, string[]>();
+  for (const row of rows) {
+    const list = grouped.get(row.emoji) || [];
+    list.push(row.actor);
+    grouped.set(row.emoji, list);
+  }
+  return Array.from(grouped.entries()).map(([emoji, actors]) => ({
+    emoji,
+    count: actors.length,
+    actors,
+  }));
 }
 
 export function recallMessage(
@@ -544,12 +750,9 @@ export function getChatUnreadState(
         AND content != '' AND content IS NOT NULL
     `,
     )
-    .get(
-      chatJid,
-      lastReadTimestamp,
-      lastReadTimestamp,
-      `${botPrefix}:%`,
-    ) as { total: number };
+    .get(chatJid, lastReadTimestamp, lastReadTimestamp, `${botPrefix}:%`) as {
+    total: number;
+  };
 
   return {
     chatJid,
@@ -612,7 +815,9 @@ export function getUnreadAggregate(
     )
     .all() as Array<{ jid: string }>;
 
-  const items = chats.map((chat) => getChatUnreadState(chat.jid, actor, botPrefix));
+  const items = chats.map((chat) =>
+    getChatUnreadState(chat.jid, actor, botPrefix),
+  );
   const totalUnread = items.reduce((acc, item) => acc + item.unreadCount, 0);
   return { actor, totalUnread, chats: items };
 }
@@ -686,7 +891,48 @@ export interface ChatNotificationSettings {
   updatedAt: string;
 }
 
-export function getUserNotificationSettings(actor: string): UserNotificationSettings {
+export interface SearchMessageResult {
+  id: string;
+  chat_jid: string;
+  sender: string;
+  sender_name: string;
+  content: string;
+  timestamp: string;
+}
+
+export interface ThreadRecord {
+  id: string;
+  chatJid: string;
+  title: string;
+  createdBy: string;
+  createdAt: string;
+  archived: boolean;
+  archivedAt: string | null;
+}
+
+export interface SearchMessageFilters {
+  keyword?: string;
+  sender?: string;
+  chatJid?: string;
+  from?: string;
+  to?: string;
+}
+
+export interface FileAssetRecord {
+  id: string;
+  chatJid: string;
+  messageId: string | null;
+  fileName: string;
+  mimeType: string;
+  size: number;
+  storagePath: string;
+  previewable: boolean;
+  createdAt: string;
+}
+
+export function getUserNotificationSettings(
+  actor: string,
+): UserNotificationSettings {
   const row = db
     .prepare(
       `
@@ -848,6 +1094,267 @@ export function setChatNotificationSettings(
     allowMentions,
     updatedAt: nowIso,
   };
+}
+
+export function searchMessages(
+  filters: SearchMessageFilters,
+  botPrefix: string,
+  limit: number,
+): SearchMessageResult[] {
+  const clauses: string[] = [
+    `is_bot_message = 0`,
+    `content NOT LIKE ?`,
+    `content != ''`,
+    `content IS NOT NULL`,
+  ];
+  const params: unknown[] = [`${botPrefix}:%`];
+  if (filters.keyword) {
+    clauses.push(`content LIKE ?`);
+    params.push(`%${filters.keyword}%`);
+  }
+  if (filters.sender) {
+    clauses.push(`sender = ?`);
+    params.push(filters.sender);
+  }
+  if (filters.chatJid) {
+    clauses.push(`chat_jid = ?`);
+    params.push(filters.chatJid);
+  }
+  if (filters.from) {
+    clauses.push(`timestamp >= ?`);
+    params.push(filters.from);
+  }
+  if (filters.to) {
+    clauses.push(`timestamp <= ?`);
+    params.push(filters.to);
+  }
+  const sql = `
+    SELECT id, chat_jid, sender, sender_name, content, timestamp
+    FROM messages
+    WHERE ${clauses.join(' AND ')}
+    ORDER BY timestamp DESC
+    LIMIT ?
+  `;
+  params.push(limit);
+  return db.prepare(sql).all(...params) as SearchMessageResult[];
+}
+
+export function createFileAsset(input: {
+  id: string;
+  chatJid: string;
+  messageId?: string | null;
+  fileName: string;
+  mimeType: string;
+  size: number;
+  storagePath: string;
+  previewable: boolean;
+  createdAt: string;
+}): FileAssetRecord {
+  db.prepare(
+    `
+      INSERT OR REPLACE INTO file_assets (
+        id, chat_jid, message_id, file_name, mime_type, size, storage_path, previewable, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `,
+  ).run(
+    input.id,
+    input.chatJid,
+    input.messageId || null,
+    input.fileName,
+    input.mimeType,
+    input.size,
+    input.storagePath,
+    input.previewable ? 1 : 0,
+    input.createdAt,
+  );
+  return {
+    id: input.id,
+    chatJid: input.chatJid,
+    messageId: input.messageId || null,
+    fileName: input.fileName,
+    mimeType: input.mimeType,
+    size: input.size,
+    storagePath: input.storagePath,
+    previewable: input.previewable,
+    createdAt: input.createdAt,
+  };
+}
+
+export function getFileAssetById(id: string): FileAssetRecord | undefined {
+  const row = db
+    .prepare(
+      `
+      SELECT id, chat_jid, message_id, file_name, mime_type, size, storage_path, previewable, created_at
+      FROM file_assets
+      WHERE id = ?
+    `,
+    )
+    .get(id) as
+    | {
+        id: string;
+        chat_jid: string;
+        message_id: string | null;
+        file_name: string;
+        mime_type: string;
+        size: number;
+        storage_path: string;
+        previewable: number;
+        created_at: string;
+      }
+    | undefined;
+  if (!row) return undefined;
+  return {
+    id: row.id,
+    chatJid: row.chat_jid,
+    messageId: row.message_id,
+    fileName: row.file_name,
+    mimeType: row.mime_type,
+    size: Number(row.size),
+    storagePath: row.storage_path,
+    previewable: row.previewable === 1,
+    createdAt: row.created_at,
+  };
+}
+
+export function listFileAssets(input: {
+  chatJid?: string;
+  keyword?: string;
+  mimeType?: string;
+  limit: number;
+}): FileAssetRecord[] {
+  const clauses: string[] = [];
+  const params: unknown[] = [];
+  if (input.chatJid) {
+    clauses.push(`chat_jid = ?`);
+    params.push(input.chatJid);
+  }
+  if (input.keyword) {
+    clauses.push(`file_name LIKE ?`);
+    params.push(`%${input.keyword}%`);
+  }
+  if (input.mimeType) {
+    clauses.push(`mime_type = ?`);
+    params.push(input.mimeType);
+  }
+  const sql = `
+    SELECT id, chat_jid, message_id, file_name, mime_type, size, storage_path, previewable, created_at
+    FROM file_assets
+    ${clauses.length ? `WHERE ${clauses.join(' AND ')}` : ''}
+    ORDER BY created_at DESC
+    LIMIT ?
+  `;
+  params.push(input.limit);
+  const rows = db.prepare(sql).all(...params) as Array<{
+    id: string;
+    chat_jid: string;
+    message_id: string | null;
+    file_name: string;
+    mime_type: string;
+    size: number;
+    storage_path: string;
+    previewable: number;
+    created_at: string;
+  }>;
+  return rows.map((row) => ({
+    id: row.id,
+    chatJid: row.chat_jid,
+    messageId: row.message_id,
+    fileName: row.file_name,
+    mimeType: row.mime_type,
+    size: Number(row.size),
+    storagePath: row.storage_path,
+    previewable: row.previewable === 1,
+    createdAt: row.created_at,
+  }));
+}
+
+export function appendNotificationCenterEvent(input: {
+  actor: string;
+  chatJid: string;
+  mentionType: string;
+  reason: string;
+  eventTime: string;
+}): number {
+  const result = db
+    .prepare(
+      `
+      INSERT INTO notification_center_events (actor, chat_jid, mention_type, reason, event_time, replayed, replayed_at)
+      VALUES (?, ?, ?, ?, ?, 0, NULL)
+    `,
+    )
+    .run(
+      input.actor,
+      input.chatJid,
+      input.mentionType,
+      input.reason,
+      input.eventTime,
+    );
+  return Number(result.lastInsertRowid);
+}
+
+export function listNotificationCenterEvents(
+  actor: string,
+  onlyPending: boolean,
+  limit: number,
+): Array<{
+  id: number;
+  actor: string;
+  chatJid: string;
+  mentionType: string;
+  reason: string;
+  eventTime: string;
+  replayed: boolean;
+  replayedAt: string | null;
+}> {
+  const rows = db
+    .prepare(
+      `
+      SELECT id, actor, chat_jid, mention_type, reason, event_time, replayed, replayed_at
+      FROM notification_center_events
+      WHERE actor = ? AND (? = 0 OR replayed = 0)
+      ORDER BY event_time DESC
+      LIMIT ?
+    `,
+    )
+    .all(actor, onlyPending ? 1 : 0, limit) as Array<{
+    id: number;
+    actor: string;
+    chat_jid: string;
+    mention_type: string;
+    reason: string;
+    event_time: string;
+    replayed: number;
+    replayed_at: string | null;
+  }>;
+  return rows.map((row) => ({
+    id: row.id,
+    actor: row.actor,
+    chatJid: row.chat_jid,
+    mentionType: row.mention_type,
+    reason: row.reason,
+    eventTime: row.event_time,
+    replayed: row.replayed === 1,
+    replayedAt: row.replayed_at,
+  }));
+}
+
+export function markNotificationCenterDelivered(
+  actor: string,
+  ids: number[],
+  replayedAt: string,
+): number {
+  if (ids.length === 0) return 0;
+  const placeholders = ids.map(() => '?').join(',');
+  const result = db
+    .prepare(
+      `
+      UPDATE notification_center_events
+      SET replayed = 1, replayed_at = ?
+      WHERE actor = ? AND id IN (${placeholders}) AND replayed = 0
+    `,
+    )
+    .run(replayedAt, actor, ...ids);
+  return result.changes;
 }
 
 export function createTask(

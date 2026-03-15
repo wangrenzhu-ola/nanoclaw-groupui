@@ -163,6 +163,57 @@ describe('webui-api', () => {
     expect(body.sessions[1].groupFolder).toBe('alpha-group');
   });
 
+  it('creates dm session through nav api', async () => {
+    const created = await makeRequest(port, '/api/nav/dm', {
+      method: 'POST',
+      body: { jid: 'u2@s.whatsapp.net', name: 'Bob' },
+    });
+    expect(created.statusCode).toBe(201);
+
+    const listed = await makeRequest(port, '/api/nav/sessions');
+    const body = listed.body as { sessions: Array<{ jid: string; type: string }> };
+    const dm = body.sessions.find((item) => item.jid === 'u2@s.whatsapp.net');
+    expect(dm?.type).toBe('dm');
+  });
+
+  it('creates and archives thread', async () => {
+    const created = await makeRequest(port, '/api/nav/threads', {
+      method: 'POST',
+      body: {
+        chatJid: 'g1@g.us',
+        title: 'incident-thread',
+        createdBy: 'alice',
+      },
+    });
+    expect(created.statusCode).toBe(201);
+    const createdBody = created.body as { thread: { id: string } };
+    const threadId = createdBody.thread.id;
+
+    const listed = await makeRequest(
+      port,
+      `/api/nav/threads?chatJid=${encodeURIComponent('g1@g.us')}`,
+    );
+    expect(listed.statusCode).toBe(200);
+    const listedBody = listed.body as { threads: Array<{ id: string }> };
+    expect(listedBody.threads.some((item) => item.id === threadId)).toBe(true);
+
+    const archived = await makeRequest(
+      port,
+      `/api/nav/threads/${encodeURIComponent(threadId)}/archive`,
+      { method: 'POST' },
+    );
+    expect(archived.statusCode).toBe(200);
+
+    const listedAfter = await makeRequest(
+      port,
+      `/api/nav/threads?chatJid=${encodeURIComponent('g1@g.us')}`,
+    );
+    const listedAfterBody = listedAfter.body as { threads: Array<{ id: string }> };
+    expect(listedAfterBody.threads.some((item) => item.id === threadId)).toBe(
+      false,
+    );
+  });
+
   it('returns messages with limit and since filters', async () => {
     const encodedJid = encodeURIComponent('g1@g.us');
     const res = await makeRequest(
@@ -274,6 +325,43 @@ describe('webui-api', () => {
     expect(body.code).toBe('MESSAGE_RECALL_EXPIRED');
   });
 
+  it('deduplicates concurrent same emoji reactions', async () => {
+    const chatJid = encodeURIComponent('g1@g.us');
+    const messageId = encodeURIComponent('m1');
+    const first = await makeRequest(
+      port,
+      `/api/messages/${chatJid}/${messageId}/reactions`,
+      {
+        method: 'POST',
+        body: { actor: 'alice', emoji: '👍' },
+      },
+    );
+    expect(first.statusCode).toBe(200);
+    const second = await makeRequest(
+      port,
+      `/api/messages/${chatJid}/${messageId}/reactions`,
+      {
+        method: 'POST',
+        body: { actor: 'alice', emoji: '👍' },
+      },
+    );
+    expect(second.statusCode).toBe(200);
+    const secondBody = second.body as { deduplicated: boolean; count: number };
+    expect(secondBody.deduplicated).toBe(true);
+    expect(secondBody.count).toBe(1);
+
+    const summary = await makeRequest(
+      port,
+      `/api/messages/${chatJid}/${messageId}/reactions`,
+    );
+    expect(summary.statusCode).toBe(200);
+    const summaryBody = summary.body as {
+      reactions: Array<{ emoji: string; count: number }>;
+    };
+    expect(summaryBody.reactions[0].emoji).toBe('👍');
+    expect(summaryBody.reactions[0].count).toBe(1);
+  });
+
   it('disables @agent suggestions when channel has no agents', async () => {
     const res = await makeRequest(port, '/api/mentions/resolve', {
       method: 'POST',
@@ -323,9 +411,125 @@ describe('webui-api', () => {
     expect(script.body).toContain('/api/notifications/evaluate');
   });
 
+  it('returns r4 acceptance page and script', async () => {
+    const page = await makeTextRequest(port, '/r4-acceptance');
+    expect(page.statusCode).toBe(200);
+    expect(page.contentType).toContain('text/html');
+    expect(page.body).toContain('R4 搜索与文件中心验收');
+    expect(page.body).toContain('/r4-acceptance.js');
+
+    const script = await makeTextRequest(port, '/r4-acceptance.js');
+    expect(script.statusCode).toBe(200);
+    expect(script.contentType).toContain('application/javascript');
+    expect(script.body).toContain('bindR4Acceptance');
+    expect(script.body).toContain('/api/search/messages');
+    expect(script.body).toContain('/api/files');
+  });
+
+  it('searches messages by keyword sender and time range', async () => {
+    storeMessageDirect({
+      id: 'm4',
+      chat_jid: 'g1@g.us',
+      sender: 'alice',
+      sender_name: 'Alice',
+      content: 'release checklist ready',
+      timestamp: '2026-03-20T10:03:00.000Z',
+      is_from_me: false,
+    });
+    storeMessageDirect({
+      id: 'm5',
+      chat_jid: 'g1@g.us',
+      sender: 'bob',
+      sender_name: 'Bob',
+      content: 'release checklist ready',
+      timestamp: '2026-03-20T10:04:00.000Z',
+      is_from_me: false,
+    });
+    storeMessageDirect({
+      id: 'm6',
+      chat_jid: 'g1@g.us',
+      sender: 'alice',
+      sender_name: 'Alice',
+      content: 'release other topic',
+      timestamp: '2026-01-20T10:05:00.000Z',
+      is_from_me: false,
+    });
+    const res = await makeRequest(
+      port,
+      `/api/search/messages?keyword=${encodeURIComponent(
+        'release checklist',
+      )}&sender=alice&chatJid=${encodeURIComponent(
+        'g1@g.us',
+      )}&from=2026-03-01T00:00:00.000Z&to=2026-03-31T23:59:59.999Z&limit=20`,
+    );
+    expect(res.statusCode).toBe(200);
+    const body = res.body as {
+      total: number;
+      results: Array<{ id: string; sender: string }>;
+    };
+    expect(body.total).toBe(1);
+    expect(body.results[0].id).toBe('m4');
+    expect(body.results[0].sender).toBe('alice');
+  });
+
+  it('creates file asset and supports metadata fallback with download', async () => {
+    const created = await makeRequest(port, '/api/files', {
+      method: 'POST',
+      body: {
+        chatJid: 'g1@g.us',
+        fileName: 'manual.zip',
+        mimeType: 'application/zip',
+        size: 2048,
+        storagePath: '/files/manual.zip',
+      },
+    });
+    expect(created.statusCode).toBe(201);
+    const createdBody = created.body as {
+      asset: { id: string; previewable: boolean };
+    };
+    expect(createdBody.asset.previewable).toBe(false);
+    const fileId = createdBody.asset.id;
+
+    const detail = await makeRequest(
+      port,
+      `/api/files/${encodeURIComponent(fileId)}`,
+    );
+    expect(detail.statusCode).toBe(200);
+    const detailBody = detail.body as {
+      preview: { mode: string; available: boolean };
+      downloadUrl: string;
+    };
+    expect(detailBody.preview.mode).toBe('metadata');
+    expect(detailBody.preview.available).toBe(false);
+    expect(detailBody.downloadUrl).toContain('/download');
+
+    const download = await makeRequest(
+      port,
+      `/api/files/${encodeURIComponent(fileId)}/download`,
+    );
+    expect(download.statusCode).toBe(200);
+    const downloadBody = download.body as {
+      fileName: string;
+      storagePath: string;
+    };
+    expect(downloadBody.fileName).toBe('manual.zip');
+    expect(downloadBody.storagePath).toBe('/files/manual.zip');
+
+    const listed = await makeRequest(
+      port,
+      `/api/files?chatJid=${encodeURIComponent('g1@g.us')}&keyword=${encodeURIComponent('manual')}&limit=20`,
+    );
+    expect(listed.statusCode).toBe(200);
+    const listedBody = listed.body as { total: number };
+    expect(listedBody.total).toBeGreaterThan(0);
+  });
+
   it('tracks unread and supports mark-as-read', async () => {
     const chatJid = encodeURIComponent('g1@g.us');
-    const before = await makeRequest(port, `/api/unread/${chatJid}?actor=alice`);
+    const before = await makeRequest(
+      port,
+      `/api/unread/${chatJid}?actor=alice`,
+    );
     expect(before.statusCode).toBe(200);
     const beforeBody = before.body as {
       state: { unreadCount: number; lastReadTimestamp: string | null };
@@ -447,5 +651,76 @@ describe('webui-api', () => {
     };
     expect(overriddenBody.decision.deliver).toBe(false);
     expect(overriddenBody.decision.reason).toBe('USER_GLOBAL_OFF');
+  });
+
+  it('stores deferred notifications into center and supports replay', async () => {
+    await makeRequest(port, '/api/notifications/users/alice/settings', {
+      method: 'PUT',
+      body: {
+        globalLevel: 'all',
+        dndEnabled: true,
+        dndStart: '22:00',
+        dndEnd: '08:00',
+      },
+    });
+    const evaluated = await makeRequest(port, '/api/notifications/evaluate', {
+      method: 'POST',
+      body: {
+        actor: 'alice',
+        chatJid: 'g1@g.us',
+        mentionType: 'none',
+        now: '2026-03-15T23:00:00.000Z',
+      },
+    });
+    expect(evaluated.statusCode).toBe(200);
+    const evalBody = evaluated.body as { deferredEventId: number | null };
+    expect(evalBody.deferredEventId).not.toBeNull();
+
+    const listed = await makeRequest(
+      port,
+      '/api/notifications/center?actor=alice&onlyPending=true&limit=20',
+    );
+    expect(listed.statusCode).toBe(200);
+    const listedBody = listed.body as {
+      events: Array<{ id: number }>;
+    };
+    expect(listedBody.events.length).toBeGreaterThan(0);
+
+    const replay = await makeRequest(port, '/api/notifications/center/replay', {
+      method: 'POST',
+      body: { actor: 'alice', ids: [listedBody.events[0].id] },
+    });
+    expect(replay.statusCode).toBe(200);
+    const replayBody = replay.body as { replayed: number };
+    expect(replayBody.replayed).toBe(1);
+  });
+
+  it('evaluates search metrics and returns top10 precision recall', async () => {
+    const res = await makeRequest(port, '/api/search/evaluate', {
+      method: 'POST',
+      body: {
+        cases: [
+          {
+            query: 'hello',
+            expectedIds: ['m1'],
+            filters: { chatJid: 'g1@g.us' },
+          },
+          {
+            query: 'world',
+            expectedIds: ['m2'],
+            filters: { chatJid: 'g1@g.us' },
+          },
+        ],
+      },
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.body as {
+      top10HitRate: number;
+      precision: number;
+      recall: number;
+    };
+    expect(body.top10HitRate).toBeGreaterThan(0);
+    expect(body.precision).toBeGreaterThan(0);
+    expect(body.recall).toBeGreaterThan(0);
   });
 });
