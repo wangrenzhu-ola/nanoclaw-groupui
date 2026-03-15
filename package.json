@@ -19,6 +19,9 @@
     "r2:acceptance": "tsx src/r2-acceptance.ts",
     "r3:acceptance": "tsx src/r3-acceptance.ts",
     "r4:acceptance": "tsx src/r4-acceptance.ts",
+    "r7:drill": "bash scripts/r7_backup_restore_drill.sh",
+    "r7:release-check": "bash scripts/r7_release_check.sh",
+    "r7:acceptance": "npm run r7:drill && npm run r7:release-check",
     "test": "vitest run",
     "test:watch": "vitest"
   },

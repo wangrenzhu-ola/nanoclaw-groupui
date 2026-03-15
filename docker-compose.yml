@@ -15,8 +15,8 @@ services:
       - DATABASE_URL=file:/app/groups/messages.db
       - RUNTIME_DB_URL=file:/app/groups/messages.db
       - GROUPS_PATH=/app/groups
-      - AUTH_SECRET=supersecret
-      - ADMIN_PASSWORD=admin
+      - AUTH_SECRET=${AUTH_SECRET:-supersecret}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-admin}
     volumes:
       - ./groups:/app/groups
 
@@ -27,15 +27,14 @@ services:
     volumes:
       - ./groups:/app/groups
       - /var/run/docker.sock:/var/run/docker.sock
-    # command: ["node", "dist/index.js"] # Removed override to use Dockerfile CMD
     environment:
       - GROUPS_PATH=/app/groups
       - STORE_DIR=/app/groups
       - LOG_LEVEL=debug
       - CREDENTIAL_PROXY_PORT=3002
       - WEBUI_URL=http://webui:3000
-      - ANTHROPIC_BASE_URL=https://api.minimax.chat/v1
-      - ANTHROPIC_AUTH_TOKEN=sk-cp-oPQB9N6tKZCICzNkHIywhKrHNiZmbJ_KZG2s-MDdB8Yyc9q5jIbBP4vaRVwV04_42JDeesO83C8mZDWOaJUiZc0eIcfuZkw7vbygAfxFoQR9dgBQD0DrjG0
-      - MODEL_NAME=abab6.5s-chat
+      - ANTHROPIC_BASE_URL=${ANTHROPIC_BASE_URL:-https://api.minimax.chat/v1}
+      - ANTHROPIC_AUTH_TOKEN=${ANTHROPIC_AUTH_TOKEN}
+      - MODEL_NAME=${MODEL_NAME:-abab6.5s-chat}
     depends_on:
       - webui

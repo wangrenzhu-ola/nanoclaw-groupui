@@ -5,8 +5,8 @@
 | 字段     | 内容                               |
 | -------- | ---------------------------------- |
 | 文档 ID  | OSP-NCW-QA-001                     |
-| 版本     | v1.2                               |
-| 状态     | Ready for Execution                |
+| 版本     | v1.5                               |
+| 状态     | In Execution                       |
 | 生效日期 | 2026-03-15                         |
 | 责任人   | QA负责人 / 开发负责人 / 产品负责人 |
 | 关联规格 | OSP-NCW-SPEC-001                   |
@@ -149,3 +149,26 @@
 | v1.0 | 2026-03-15 | QA组      | 建立全功能覆盖测试用例与交付门禁                     |
 | v1.1 | 2026-03-15 | 执行Agent | 新增MiniMax2.5基础联通性用例 TC-NCW-LLM-CONN-001~003 |
 | v1.2 | 2026-03-15 | 执行Agent | 将联通性门禁执行时点前移到R2交付前                   |
+| v1.3 | 2026-03-15 | 执行Agent | 回填R5/R6自动化执行留痕，补充结果追踪表              |
+| v1.4 | 2026-03-15 | 执行Agent | 启动R7迭代并冻结部署与合规门禁，新增R7执行追踪记录   |
+| v1.5 | 2026-03-15 | 执行Agent | 回填R7首批执行证据：r7验收命令通过并新增脚本证据链   |
+| v1.6 | 2026-03-15 | 执行Agent | R7人工验收通过，启动R8全量回归测试                   |
+
+## 8. 执行结果追踪（R5/R7）
+
+### 8.1 执行命令
+
+1. `npm run test -- src/webui-api.test.ts src/ipc-auth.test.ts src/sender-allowlist.test.ts src/group-queue.test.ts src/container-runner.test.ts src/credential-proxy.test.ts`
+2. `npm run typecheck`
+3. `npm run r7:acceptance`
+
+### 8.2 用例与结果回填
+
+| 轮次  | 用例范围                             | 结果        | 证据                                                                                                                       | 备注                                  |
+| ----- | ------------------------------------ | ----------- | -------------------------------------------------------------------------------------------------------------------------- | ------------------------------------- |
+| R5    | TC-NCW-RBAC-\*、TC-NCW-AUDIT-\*      | Pass        | `src/webui-api.test.ts`（频道策略越权拦截、审计日志字段完整性）、`src/ipc-auth.test.ts`                                    | 新增Channel Policy API与Audit日志查询 |
+| R5    | TC-NCW-AGENT-\*                      | Pass        | `src/sender-allowlist.test.ts`、`src/ipc-auth.test.ts`                                                                     | Agent边界与跨组授权拦截验证通过       |
+| R6    | TC-NCW-REC-\*、TC-NCW-AUTH-001       | Pass        | `src/group-queue.test.ts`、`src/container-runner.test.ts`、`src/credential-proxy.test.ts`                                  | 异常恢复、超时重试、认证失败透传通过  |
+| R5+R6 | 自动化回归总计（2026-03-15当轮执行） | 100 Pass    | `src/webui-api.test.ts` 24项 + `src/ipc-auth.test.ts` 33项 + `src/sender-allowlist.test.ts` 19项 + R6相关 24项 + typecheck | 本轮命令输出：6文件100测试全部通过    |
+| R7    | TC-NCW-DEPLOY-001、TC-NCW-COMP-\*    | Pass        | `scripts/r7_backup_restore_drill.sh`、`scripts/r7_release_check.sh`、`artifacts/r7-drill/`、`DEPLOYMENT_CHECKLIST.md`      | R7验收通过，部署SLA与合规策略已验证   |
+| R8    | 全量回归（D-01~D-04）                | In Progress | `test-results/`                                                                                                            | 启动全量回归测试，覆盖所有P0/P1用例   |

@@ -171,9 +171,102 @@ describe('webui-api', () => {
     expect(created.statusCode).toBe(201);
 
     const listed = await makeRequest(port, '/api/nav/sessions');
-    const body = listed.body as { sessions: Array<{ jid: string; type: string }> };
+    const body = listed.body as {
+      sessions: Array<{ jid: string; type: string }>;
+    };
     const dm = body.sessions.find((item) => item.jid === 'u2@s.whatsapp.net');
     expect(dm?.type).toBe('dm');
+  });
+
+  it('blocks member channel policy change and writes audit log', async () => {
+    const chatJid = encodeURIComponent('g1@g.us');
+    const denied = await makeRequest(port, `/api/channel-policy/${chatJid}`, {
+      method: 'PUT',
+      body: {
+        actor: 'alice',
+        role: 'member',
+        isPrivate: true,
+        archived: false,
+        reason: 'try overreach',
+      },
+    });
+    expect(denied.statusCode).toBe(403);
+    const deniedBody = denied.body as { code: string; audit: { action: string } };
+    expect(deniedBody.code).toBe('RBAC_FORBIDDEN');
+    expect(deniedBody.audit.action).toBe('CHANNEL_POLICY_UPDATE_DENIED');
+
+    const audits = await makeRequest(
+      port,
+      '/api/audit/logs?action=CHANNEL_POLICY_UPDATE_DENIED&limit=20',
+    );
+    expect(audits.statusCode).toBe(200);
+    const auditsBody = audits.body as {
+      logs: Array<{ actor: string; targetType: string; targetId: string; ip: string | null }>;
+    };
+    expect(auditsBody.logs.length).toBeGreaterThan(0);
+    expect(auditsBody.logs[0].actor).toBe('alice');
+    expect(auditsBody.logs[0].targetType).toBe('channel');
+    expect(auditsBody.logs[0].targetId).toBe('g1@g.us');
+    expect(auditsBody.logs[0].ip).toBeTruthy();
+  });
+
+  it('updates channel private and archived policy for admin', async () => {
+    const chatJid = encodeURIComponent('g1@g.us');
+    const updated = await makeRequest(port, `/api/channel-policy/${chatJid}`, {
+      method: 'PUT',
+      body: {
+        actor: 'ops-admin',
+        role: 'workspace_admin',
+        isPrivate: true,
+        archived: true,
+        reason: 'compliance lock',
+      },
+    });
+    expect(updated.statusCode).toBe(200);
+    const updatedBody = updated.body as {
+      policy: { chatJid: string; isPrivate: boolean; archived: boolean; archivedAt: string | null };
+      audit: { action: string; role: string };
+    };
+    expect(updatedBody.policy.chatJid).toBe('g1@g.us');
+    expect(updatedBody.policy.isPrivate).toBe(true);
+    expect(updatedBody.policy.archived).toBe(true);
+    expect(updatedBody.policy.archivedAt).toBeTruthy();
+    expect(updatedBody.audit.action).toBe('CHANNEL_POLICY_UPDATED');
+    expect(updatedBody.audit.role).toBe('workspace_admin');
+
+    const queried = await makeRequest(port, `/api/channel-policy/${chatJid}`);
+    expect(queried.statusCode).toBe(200);
+    const queriedBody = queried.body as {
+      policy: { isPrivate: boolean; archived: boolean };
+    };
+    expect(queriedBody.policy.isPrivate).toBe(true);
+    expect(queriedBody.policy.archived).toBe(true);
+
+    const logs = await makeRequest(
+      port,
+      '/api/audit/logs?action=CHANNEL_POLICY_UPDATED&targetType=channel&limit=20',
+    );
+    expect(logs.statusCode).toBe(200);
+    const logsBody = logs.body as {
+      logs: Array<{
+        actor: string;
+        role: string;
+        action: string;
+        targetType: string;
+        targetId: string;
+        details: { before: { isPrivate: boolean }; after: { isPrivate: boolean } };
+        createdAt: string;
+      }>;
+    };
+    expect(logsBody.logs.length).toBeGreaterThan(0);
+    expect(logsBody.logs[0].actor).toBe('ops-admin');
+    expect(logsBody.logs[0].role).toBe('workspace_admin');
+    expect(logsBody.logs[0].action).toBe('CHANNEL_POLICY_UPDATED');
+    expect(logsBody.logs[0].targetType).toBe('channel');
+    expect(logsBody.logs[0].targetId).toBe('g1@g.us');
+    expect(logsBody.logs[0].details.before.isPrivate).toBe(false);
+    expect(logsBody.logs[0].details.after.isPrivate).toBe(true);
+    expect(logsBody.logs[0].createdAt).toContain('T');
   });
 
   it('creates and archives thread', async () => {
@@ -208,7 +301,9 @@ describe('webui-api', () => {
       port,
       `/api/nav/threads?chatJid=${encodeURIComponent('g1@g.us')}`,
     );
-    const listedAfterBody = listedAfter.body as { threads: Array<{ id: string }> };
+    const listedAfterBody = listedAfter.body as {
+      threads: Array<{ id: string }>;
+    };
     expect(listedAfterBody.threads.some((item) => item.id === threadId)).toBe(
       false,
     );

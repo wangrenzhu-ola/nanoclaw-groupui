@@ -21,7 +21,10 @@ function createSchema(database: Database.Database): void {
       name TEXT,
       last_message_time TEXT,
       channel TEXT,
-      is_group INTEGER DEFAULT 0
+      is_group INTEGER DEFAULT 0,
+      is_private INTEGER DEFAULT 0,
+      is_archived INTEGER DEFAULT 0,
+      archived_at TEXT
     );
     CREATE TABLE IF NOT EXISTS messages (
       id TEXT,
@@ -159,6 +162,20 @@ function createSchema(database: Database.Database): void {
       container_config TEXT,
       requires_trigger INTEGER DEFAULT 1
     );
+    CREATE TABLE IF NOT EXISTS audit_logs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      actor TEXT NOT NULL,
+      role TEXT NOT NULL,
+      action TEXT NOT NULL,
+      target_type TEXT NOT NULL,
+      target_id TEXT NOT NULL,
+      details TEXT NOT NULL DEFAULT '{}',
+      ip TEXT,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_audit_logs_time ON audit_logs(created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_audit_logs_target ON audit_logs(target_type, target_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_audit_logs_actor ON audit_logs(actor, created_at DESC);
   `);
 
   // Add context_mode column if it doesn't exist (migration for existing DBs)
@@ -240,6 +257,24 @@ function createSchema(database: Database.Database): void {
   } catch {
     /* columns already exist */
   }
+
+  try {
+    database.exec(`ALTER TABLE chats ADD COLUMN is_private INTEGER DEFAULT 0`);
+  } catch {
+    /* column already exists */
+  }
+
+  try {
+    database.exec(`ALTER TABLE chats ADD COLUMN is_archived INTEGER DEFAULT 0`);
+  } catch {
+    /* column already exists */
+  }
+
+  try {
+    database.exec(`ALTER TABLE chats ADD COLUMN archived_at TEXT`);
+  } catch {
+    /* column already exists */
+  }
 }
 
 export function initDatabase(): void {
@@ -319,6 +354,9 @@ export interface ChatInfo {
   last_message_time: string;
   channel: string;
   is_group: number;
+  is_private: number;
+  is_archived: number;
+  archived_at: string | null;
 }
 
 /**
@@ -328,12 +366,216 @@ export function getAllChats(): ChatInfo[] {
   return db
     .prepare(
       `
-    SELECT jid, name, last_message_time, channel, is_group
+    SELECT jid, name, last_message_time, channel, is_group, is_private, is_archived, archived_at
     FROM chats
     ORDER BY last_message_time DESC
   `,
     )
     .all() as ChatInfo[];
+}
+
+export interface ChannelPolicy {
+  chatJid: string;
+  isPrivate: boolean;
+  archived: boolean;
+  archivedAt: string | null;
+  updatedAt: string;
+}
+
+export function getChannelPolicy(chatJid: string): ChannelPolicy {
+  const row = db
+    .prepare(
+      `
+      SELECT jid, is_private, is_archived, archived_at, last_message_time
+      FROM chats
+      WHERE jid = ?
+    `,
+    )
+    .get(chatJid) as
+    | {
+        jid: string;
+        is_private: number;
+        is_archived: number;
+        archived_at: string | null;
+        last_message_time: string | null;
+      }
+    | undefined;
+  if (!row) {
+    return {
+      chatJid,
+      isPrivate: false,
+      archived: false,
+      archivedAt: null,
+      updatedAt: '',
+    };
+  }
+  return {
+    chatJid: row.jid,
+    isPrivate: row.is_private === 1,
+    archived: row.is_archived === 1,
+    archivedAt: row.archived_at,
+    updatedAt: row.last_message_time || '',
+  };
+}
+
+export function setChannelPolicy(input: {
+  chatJid: string;
+  isPrivate: boolean;
+  archived: boolean;
+  archivedAt: string | null;
+  updatedAt: string;
+}): ChannelPolicy {
+  db.prepare(
+    `
+    INSERT INTO chats (jid, name, last_message_time, is_private, is_archived, archived_at)
+    VALUES (?, ?, ?, ?, ?, ?)
+    ON CONFLICT(jid) DO UPDATE SET
+      last_message_time = excluded.last_message_time,
+      is_private = excluded.is_private,
+      is_archived = excluded.is_archived,
+      archived_at = excluded.archived_at
+  `,
+  ).run(
+    input.chatJid,
+    input.chatJid,
+    input.updatedAt,
+    input.isPrivate ? 1 : 0,
+    input.archived ? 1 : 0,
+    input.archivedAt,
+  );
+  return getChannelPolicy(input.chatJid);
+}
+
+export interface AuditLogRecord {
+  id: number;
+  actor: string;
+  role: string;
+  action: string;
+  targetType: string;
+  targetId: string;
+  details: Record<string, unknown>;
+  ip: string | null;
+  createdAt: string;
+}
+
+export function appendAuditLog(input: {
+  actor: string;
+  role: string;
+  action: string;
+  targetType: string;
+  targetId: string;
+  details: Record<string, unknown>;
+  ip: string | null;
+  createdAt: string;
+}): AuditLogRecord {
+  const result = db
+    .prepare(
+      `
+      INSERT INTO audit_logs (actor, role, action, target_type, target_id, details, ip, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `,
+    )
+    .run(
+      input.actor,
+      input.role,
+      input.action,
+      input.targetType,
+      input.targetId,
+      JSON.stringify(input.details || {}),
+      input.ip,
+      input.createdAt,
+    );
+  const id = Number(result.lastInsertRowid);
+  const row = db
+    .prepare(
+      `
+      SELECT id, actor, role, action, target_type, target_id, details, ip, created_at
+      FROM audit_logs
+      WHERE id = ?
+    `,
+    )
+    .get(id) as {
+    id: number;
+    actor: string;
+    role: string;
+    action: string;
+    target_type: string;
+    target_id: string;
+    details: string;
+    ip: string | null;
+    created_at: string;
+  };
+  return {
+    id: row.id,
+    actor: row.actor,
+    role: row.role,
+    action: row.action,
+    targetType: row.target_type,
+    targetId: row.target_id,
+    details: JSON.parse(row.details),
+    ip: row.ip,
+    createdAt: row.created_at,
+  };
+}
+
+export function listAuditLogs(input: {
+  limit: number;
+  actor?: string;
+  action?: string;
+  targetType?: string;
+  targetId?: string;
+}): AuditLogRecord[] {
+  const clauses: string[] = [];
+  const params: Array<string | number> = [];
+  if (input.actor) {
+    clauses.push(`actor = ?`);
+    params.push(input.actor);
+  }
+  if (input.action) {
+    clauses.push(`action = ?`);
+    params.push(input.action);
+  }
+  if (input.targetType) {
+    clauses.push(`target_type = ?`);
+    params.push(input.targetType);
+  }
+  if (input.targetId) {
+    clauses.push(`target_id = ?`);
+    params.push(input.targetId);
+  }
+  const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+  const rows = db
+    .prepare(
+      `
+      SELECT id, actor, role, action, target_type, target_id, details, ip, created_at
+      FROM audit_logs
+      ${where}
+      ORDER BY created_at DESC, id DESC
+      LIMIT ?
+    `,
+    )
+    .all(...params, input.limit) as Array<{
+    id: number;
+    actor: string;
+    role: string;
+    action: string;
+    target_type: string;
+    target_id: string;
+    details: string;
+    ip: string | null;
+    created_at: string;
+  }>;
+  return rows.map((row) => ({
+    id: row.id,
+    actor: row.actor,
+    role: row.role,
+    action: row.action,
+    targetType: row.target_type,
+    targetId: row.target_id,
+    details: JSON.parse(row.details || '{}'),
+    ip: row.ip,
+    createdAt: row.created_at,
+  }));
 }
 
 /**
@@ -468,7 +710,10 @@ export function createThread(input: {
   };
 }
 
-export function listThreads(chatJid: string, includeArchived: boolean): ThreadRecord[] {
+export function listThreads(
+  chatJid: string,
+  includeArchived: boolean,
+): ThreadRecord[] {
   const rows = db
     .prepare(
       `
@@ -498,7 +743,10 @@ export function listThreads(chatJid: string, includeArchived: boolean): ThreadRe
   }));
 }
 
-export function archiveThread(threadId: string, archivedAt: string): ThreadRecord | undefined {
+export function archiveThread(
+  threadId: string,
+  archivedAt: string,
+): ThreadRecord | undefined {
   const result = db
     .prepare(
       `
@@ -590,7 +838,9 @@ export function addMessageReaction(input: {
       ORDER BY created_at ASC
     `,
     )
-    .all(input.chatJid, input.messageId, input.emoji) as Array<{ actor: string }>;
+    .all(input.chatJid, input.messageId, input.emoji) as Array<{
+    actor: string;
+  }>;
   return {
     deduplicated: result.changes === 0,
     count: rows.length,

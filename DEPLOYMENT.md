@@ -1,70 +1,83 @@
 # NanoClaw Deployment Guide
 
-This guide details the environment requirements and steps to deploy NanoClaw locally with Docker Compose.
-
 ## 1. Environment Requirements
 
-Ensure your environment matches these specifications for reproducibility:
+- OS: macOS or Linux
+- Node.js: 20+
+- Docker Engine/Desktop: 26+
+- Docker Compose: v2.27+
 
-- **OS**: macOS (Apple Silicon recommended) or Linux (x86_64/arm64). Windows via WSL2.
-- **Node.js**: v20.18.0 or higher (LTS Iron).
-- **Docker**: Docker Desktop 4.30+ or Docker Engine 26.1+.
-- **Compose**: Docker Compose v2.27+.
+## 2. Configure Environment
 
-### Verification
+1. Copy template:
+
 ```bash
-node -v
-docker --version
-docker compose version
+cp .env.example .env
 ```
 
-## 2. Quick Start (Real LLM Mode)
+2. Edit `.env` and set:
+   - `AUTH_SECRET`
+   - `ADMIN_PASSWORD`
+   - `ANTHROPIC_AUTH_TOKEN`
+   - optional `ANTHROPIC_BASE_URL`, `MODEL_NAME`
 
-To run with a real MiniMax or Anthropic API key (Required):
+## 3. Deploy
 
-### Steps
-
-1. **Clone & Setup**
-   ```bash
-   git clone <repo-url> nanoclaw
-   cd nanoclaw/nanoclaw-groupui
-   ```
-
-2. **Configure API Key**
-   Edit `docker-compose.yml` and set your API key:
-   ```yaml
-   environment:
-     - ANTHROPIC_BASE_URL=https://api.minimax.chat/v1
-     - ANTHROPIC_AUTH_TOKEN=sk-your-key-here
-     - MODEL_NAME=abab6.5s-chat
-   ```
-
-3. **Build & Run**
-   ```bash
-   docker-compose up -d --build
-   ```
-
-4. **Verify**
-   - Open [http://localhost](http://localhost) (Nginx proxy) or [http://localhost:3000](http://localhost:3000) (Direct).
-   - Login: `admin` / `admin`.
-   - Select "Test Agent".
-   - Send "Hello".
-   - **Expected**: You see a real response from the LLM streaming back.
-
-### Logs
-To debug, view logs:
 ```bash
-docker-compose logs -f core
-docker-compose logs -f webui
+docker compose up -d --build
 ```
 
-## 3. Data Persistence
+Verify service status:
 
-## 4. Data Persistence
+```bash
+docker compose ps
+```
 
-Data is persisted in `./groups` directory on the host.
-- **Database**: `./groups/messages.db`
-- **Memory**: `./groups/{agent}/CLAUDE.md`
-- **Uploads**: `./groups/{agent}/uploads/`
+Verify logs:
 
-Restarting containers (`docker-compose restart`) will preserve this data.
+```bash
+docker compose logs -f core
+docker compose logs -f webui
+```
+
+## 4. Access Check
+
+- Open `http://localhost`
+- Login with configured admin account
+- Send a test message in WebUI
+- Verify response stream is normal
+
+## 5. Persistence Scope
+
+- Database: `./groups/messages.db`
+- Agent Memory: `./groups/{agent}/CLAUDE.md`
+- Uploads: `./groups/{agent}/uploads/`
+
+## 6. R7 Backup/Restore Drill
+
+Run drill:
+
+```bash
+npm run r7:drill
+```
+
+Pass condition:
+- `RPO_SECONDS <= 900`
+- `RTO_SECONDS <= 1800`
+- `R7_BACKUP_RESTORE_DRILL_RESULT=PASS`
+
+Artifacts are generated in `artifacts/r7-drill/<timestamp>/report.txt`.
+
+## 7. R7 Release Check
+
+Run release check:
+
+```bash
+npm run r7:release-check
+```
+
+Run R7 acceptance bundle:
+
+```bash
+npm run r7:acceptance
+```

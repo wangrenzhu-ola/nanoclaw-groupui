@@ -5,12 +5,14 @@ import { ASSISTANT_NAME } from './config.js';
 import {
   addMessageReaction,
   appendNotificationCenterEvent,
+  appendAuditLog,
   archiveThread,
   ChatInfo,
   createThread,
   createFileAsset,
   editMessage,
   getAllChats,
+  getChannelPolicy,
   getAllRegisteredGroups,
   getFileAssetById,
   getMessageReactionSummary,
@@ -23,11 +25,13 @@ import {
   getPresenceStates,
   getUnreadAggregate,
   getUserNotificationSettings,
+  listAuditLogs,
   listFileAssets,
   markNotificationCenterDelivered,
   markChatAsRead,
   recallMessage,
   searchMessages,
+  setChannelPolicy,
   setChatNotificationSettings,
   setPresenceState,
   storeChatMetadata,
@@ -174,6 +178,22 @@ function parseBooleanLike(input: unknown, fallback: boolean): boolean {
     if (value === 'false') return false;
   }
   return fallback;
+}
+
+type ChannelRole = 'workspace_admin' | 'channel_admin' | 'member';
+
+function parseChannelRole(input: unknown): ChannelRole {
+  const value = String(input || '')
+    .trim()
+    .toLowerCase();
+  if (value === 'workspace_admin' || value === 'channel_admin') {
+    return value;
+  }
+  return 'member';
+}
+
+function canManageChannelPolicy(role: ChannelRole): boolean {
+  return role === 'workspace_admin' || role === 'channel_admin';
 }
 
 function parseMentionType(input: unknown): MentionType {
@@ -1146,6 +1166,112 @@ if (document.readyState === 'loading') {
       return;
     }
 
+    if (method === 'GET' && url.pathname.startsWith('/api/channel-policy/')) {
+      const match = url.pathname.match(/^\/api\/channel-policy\/([^/]+)$/);
+      if (!match) {
+        writeJson(res, 404, { error: 'Not Found' });
+        return;
+      }
+      const chatJid = decodeURIComponent(match[1]);
+      if (!chatJid) {
+        writeJson(res, 400, { code: 'INVALID_CHAT_JID' });
+        return;
+      }
+      writeJson(res, 200, { policy: getChannelPolicy(chatJid) });
+      return;
+    }
+
+    if (method === 'PUT' && url.pathname.startsWith('/api/channel-policy/')) {
+      const match = url.pathname.match(/^\/api\/channel-policy\/([^/]+)$/);
+      if (!match) {
+        writeJson(res, 404, { error: 'Not Found' });
+        return;
+      }
+      const chatJid = decodeURIComponent(match[1]);
+      if (!chatJid) {
+        writeJson(res, 400, { code: 'INVALID_CHAT_JID' });
+        return;
+      }
+      readJsonBody(req)
+        .then((body) => {
+          const payload =
+            body && typeof body === 'object'
+              ? (body as Record<string, unknown>)
+              : {};
+          const actor = parseActor(String(payload.actor || ''));
+          const role = parseChannelRole(payload.role);
+          const reason = String(payload.reason || '').trim();
+          const ip = String(payload.ip || '').trim() || req.socket.remoteAddress || null;
+          if (!canManageChannelPolicy(role)) {
+            const nowIso = new Date().toISOString();
+            const denied = appendAuditLog({
+              actor,
+              role,
+              action: 'CHANNEL_POLICY_UPDATE_DENIED',
+              targetType: 'channel',
+              targetId: chatJid,
+              details: { reason: reason || 'FORBIDDEN', payload },
+              ip,
+              createdAt: nowIso,
+            });
+            writeJson(res, 403, { code: 'RBAC_FORBIDDEN', audit: denied });
+            return;
+          }
+          const nowIso = new Date().toISOString();
+          const current = getChannelPolicy(chatJid);
+          const nextIsPrivate = parseBooleanLike(
+            payload.isPrivate,
+            current.isPrivate,
+          );
+          const nextArchived = parseBooleanLike(payload.archived, current.archived);
+          const archivedAt = nextArchived ? nowIso : null;
+          const policy = setChannelPolicy({
+            chatJid,
+            isPrivate: nextIsPrivate,
+            archived: nextArchived,
+            archivedAt,
+            updatedAt: nowIso,
+          });
+          const audit = appendAuditLog({
+            actor,
+            role,
+            action: 'CHANNEL_POLICY_UPDATED',
+            targetType: 'channel',
+            targetId: chatJid,
+            details: {
+              reason: reason || null,
+              before: current,
+              after: policy,
+            },
+            ip,
+            createdAt: nowIso,
+          });
+          writeJson(res, 200, { policy, audit });
+        })
+        .catch((err) => {
+          logger.warn({ err }, 'Invalid channel policy payload');
+          writeJson(res, 400, { code: 'INVALID_REQUEST' });
+        });
+      return;
+    }
+
+    if (method === 'GET' && url.pathname === '/api/audit/logs') {
+      const limit = parseLimit(url.searchParams.get('limit'));
+      const actor = String(url.searchParams.get('actor') || '').trim();
+      const action = String(url.searchParams.get('action') || '').trim();
+      const targetType = String(url.searchParams.get('targetType') || '').trim();
+      const targetId = String(url.searchParams.get('targetId') || '').trim();
+      const logs = listAuditLogs({
+        limit,
+        actor: actor || undefined,
+        action: action || undefined,
+        targetType: targetType || undefined,
+        targetId: targetId || undefined,
+      });
+      writeJson(res, 200, { limit, total: logs.length, logs });
+      return;
+    }
+
     if (method === 'POST' && url.pathname === '/api/nav/dm') {
       readJsonBody(req)
         .then((body) => {
@@ -1222,7 +1348,9 @@ if (document.readyState === 'loading') {
     }
 
     if (method === 'POST' && url.pathname.startsWith('/api/nav/threads/')) {
-      const match = url.pathname.match(/^\/api\/nav\/threads\/([^/]+)\/archive$/);
+      const match = url.pathname.match(
+        /^\/api\/nav\/threads\/([^/]+)\/archive$/,
+      );
       if (match) {
         const threadId = decodeURIComponent(match[1]);
         const archived = archiveThread(threadId, new Date().toISOString());
@@ -1278,9 +1406,7 @@ if (document.readyState === 'loading') {
             body && typeof body === 'object'
               ? (body as Record<string, unknown>)
               : {};
-          const cases = Array.isArray(payload.cases)
-            ? payload.cases
-            : [];
+          const cases = Array.isArray(payload.cases) ? payload.cases : [];
           if (cases.length === 0) {
             writeJson(res, 400, { code: 'INVALID_EVALUATION_CASES' });
             return;
@@ -1403,7 +1529,9 @@ if (document.readyState === 'loading') {
     }
 
     if (method === 'GET' && url.pathname.startsWith('/api/files/')) {
-      const downloadMatch = url.pathname.match(/^\/api\/files\/([^/]+)\/download$/);
+      const downloadMatch = url.pathname.match(
+        /^\/api\/files\/([^/]+)\/download$/,
+      );
       if (downloadMatch) {
         const fileId = decodeURIComponent(downloadMatch[1]);
         const asset = getFileAssetById(fileId);
@@ -1720,11 +1848,20 @@ if (document.readyState === 'loading') {
       );
       const limit = parseLimit(url.searchParams.get('limit'));
       const events = listNotificationCenterEvents(actor, onlyPending, limit);
-      writeJson(res, 200, { actor, onlyPending, limit, total: events.length, events });
+      writeJson(res, 200, {
+        actor,
+        onlyPending,
+        limit,
+        total: events.length,
+        events,
+      });
       return;
     }
 
-    if (method === 'POST' && url.pathname === '/api/notifications/center/replay') {
+    if (
+      method === 'POST' &&
+      url.pathname === '/api/notifications/center/replay'
+    ) {
       readJsonBody(req)
         .then((body) => {
           const payload =
